@@ -1,0 +1,14 @@
+# Build artifacts
+*.exe
+*.obj
+*.o
+*.out
+
+# Output
+result.csv
+*.tmp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
