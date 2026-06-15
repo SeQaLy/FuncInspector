@@ -59,6 +59,34 @@ GUI は Windows Forms を使用します (Windows 環境)。
 実行ポリシーで止まる場合:
 `powershell -ExecutionPolicy Bypass -File .\powershell\FuncInspector.ps1 -Gui`
 
+### 2-b. プロファイル埋め込み版 (`powershell/FuncInspector.Functions.ps1`)
+
+起動プロファイル ($PROFILE) に読み込んでおき、使いたいときにコマンドで呼ぶタイプです。
+このファイルは読み込んでも何も実行せず、**関数を定義するだけ**です。
+
+セットアップ (1 回だけ):
+
+```powershell
+# $PROFILE に次の1行を追記 (パスは環境に合わせる)
+. "Z:\develop\FuncInspector\powershell\FuncInspector.Functions.ps1"
+# PowerShell を再起動するか、その場で再読込:
+. $PROFILE
+```
+
+読み込み後の使い方:
+
+```powershell
+Invoke-FuncInspector -Path .\src                       # 標準出力に file,line,funcname
+Invoke-FuncInspector -Path .\src -Out result.csv -Header
+Invoke-FuncInspector -Path a.c, b.c -Extensions .c, .h
+Invoke-FuncInspector -Gui                               # GUI を開く
+funcinspect .\src                                       # 別名 (alias)
+
+# パイプ処理向けにオブジェクトで受け取る
+Invoke-FuncInspector -Path .\src -AsObject | Where-Object Function -like 'WINAMS*'
+Find-CFunctions -FilePath .\src\main.c | Format-Table
+```
+
 ## 3. C 版 (`c/func_inspector.c`)
 
 CUI のみ。フォルダ指定時は再帰的に走査します (Win32 / POSIX 両対応)。
