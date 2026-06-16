@@ -7,7 +7,7 @@
 int add(int a, int b);
 void WINAMS startup(void);
 
-/* 通常の関数定義 */
+/* 通常の関数定義 (本体は return 1行 = 1 step) */
 int add(int a, int b)
 {
     return a + b;
@@ -29,12 +29,37 @@ void run_cb(int (*cmp)(int, int), int n)
     }
 }
 
-/* 戻り値の型が次行にある K&R 風でない普通の改行スタイル */
-static long
-helper_long(long x)
+/* ---- コンパイルスイッチで囲まれた関数 ---- */
+#ifdef CFG_A
+void feature_a(void)
 {
-    return x * 2;
+    startup();
 }
+#endif
+
+#ifndef CFG_A
+void feature_default(void)
+{
+    add(1, 2);
+}
+#endif
+
+#if VER >= 2
+void feature_v2(void)
+{
+    feature_a();
+}
+#elif defined(CFG_B)
+void feature_b(void)
+{
+    add(3, 4);
+}
+#else
+void feature_legacy(void)
+{
+    add(0, 0);
+}
+#endif
 
 int main(void)
 {
