@@ -800,17 +800,35 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($lblXdHint)
 
     $lblSw = New-Object System.Windows.Forms.Label
-    $lblSw.Text = 'スイッチ (チェック=ON / ダブルクリックで箇所を開く)'; $lblSw.Location = '10,100'; $lblSw.AutoSize = $true
+    $lblSw.Text = 'スイッチ (ON=有効 / 値はプルダウン / 初出をダブルクリックで開く)'; $lblSw.Location = '10,100'; $lblSw.AutoSize = $true
     $form.Controls.Add($lblSw)
-    $swlv = New-Object System.Windows.Forms.ListView
-    $swlv.Location = '10,120'; $swlv.Size = '270,410'; $swlv.Anchor = 'Top,Bottom,Left'
-    $swlv.View = 'Details'; $swlv.CheckBoxes = $true; $swlv.FullRowSelect = $true; $swlv.GridLines = $true
-    [void]$swlv.Columns.Add('Switch', 110)
-    [void]$swlv.Columns.Add('件', 35)
-    [void]$swlv.Columns.Add('初出', 105)
-    $swlv.Add_DoubleClick({
-            if ($swlv.SelectedItems.Count -gt 0) { $info = $swlv.SelectedItems[0].Tag; if ($info) { Open-FiLocation $info.File ([int]$info.Line) } }
+    $swlv = New-Object System.Windows.Forms.DataGridView
+    $swlv.Location = '10,120'; $swlv.Size = '300,410'; $swlv.Anchor = 'Top,Bottom,Left'
+    $swlv.AllowUserToAddRows = $false; $swlv.AllowUserToDeleteRows = $false
+    $swlv.RowHeadersVisible = $false; $swlv.AutoSizeColumnsMode = 'None'
+    $swlv.SelectionMode = 'CellSelect'; $swlv.EditMode = 'EditOnEnter'
+    $colOn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+    $colOn.HeaderText = 'ON'; $colOn.Name = 'On'; $colOn.Width = 34
+    $colSw = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $colSw.HeaderText = 'Switch'; $colSw.Name = 'Sw'; $colSw.Width = 112; $colSw.ReadOnly = $true
+    $colVal = New-Object System.Windows.Forms.DataGridViewComboBoxColumn
+    $colVal.HeaderText = '値'; $colVal.Name = 'Val'; $colVal.Width = 70; $colVal.FlatStyle = 'Flat'
+    $colLoc = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $colLoc.HeaderText = '初出'; $colLoc.Name = 'Loc'; $colLoc.Width = 78; $colLoc.ReadOnly = $true
+    [void]$swlv.Columns.Add($colOn)
+    [void]$swlv.Columns.Add($colSw)
+    [void]$swlv.Columns.Add($colVal)
+    [void]$swlv.Columns.Add($colLoc)
+    $swlv.Add_DataError({ param($eSender, $e) $e.ThrowException = $false })  # 値が候補外でも例外にしない
+    $swlv.Add_CellDoubleClick({
+            param($eSender, $e)
+            if ($e.RowIndex -ge 0 -and $e.ColumnIndex -eq 3) {
+                $info = $swlv.Rows[$e.RowIndex].Tag
+                if ($info) { Open-FiLocation $info.File ([int]$info.Line) }
+            }
         })
+    # チェック/コンボの編集を即確定
+    $swlv.Add_CurrentCellDirtyStateChanged({ if ($swlv.IsCurrentCellDirty) { $swlv.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit) } })
     $form.Controls.Add($swlv)
 
     $btnDetect = New-Object System.Windows.Forms.Button
@@ -876,8 +894,11 @@ function Show-FuncInspectorGui {
                 $i++; $sync.Progress = $i; $sync.Current = $f
                 $fs = Get-FiFileSwitches -FilePath $f
                 foreach ($name in $fs.Keys) {
-                    if ($agg.ContainsKey($name)) { $agg[$name].Count += $fs[$name].Count }
-                    else { $agg[$name] = [pscustomobject]@{ Count = $fs[$name].Count; File = $f; Line = $fs[$name].Line } }
+                    if (-not $agg.ContainsKey($name)) {
+                        $agg[$name] = [pscustomobject]@{ Count = 0; File = $f; Line = $fs[$name].Line; Values = (New-Object System.Collections.Generic.List[string]) }
+                    }
+                    $agg[$name].Count += $fs[$name].Count
+                    foreach ($v in $fs[$name].Values) { if (-not $agg[$name].Values.Contains([string]$v)) { $agg[$name].Values.Add([string]$v) } }
                 }
             }
             $sync.Result = $agg
@@ -900,7 +921,16 @@ function Show-FuncInspectorGui {
         }
         else {
             $defines = @{}
-            foreach ($it in $swlv.CheckedItems) { $defines[[string]$it.Text] = '1' }
+            # DataGridView の ON 行: 値コンボの選択値で定義 (空なら 1)
+            foreach ($row in $swlv.Rows) {
+                if ($row.Cells['On'].Value -eq $true) {
+                    $nm = [string]$row.Cells['Sw'].Value
+                    if (-not $nm) { continue }
+                    $val = [string]$row.Cells['Val'].Value
+                    if (-not $val) { $val = '1' }
+                    $defines[$nm] = $val
+                }
+            }
             # 追加 -D (値指定。例: TOOL_TEST=2,FOO)
             foreach ($tok in ($tbXd.Text.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
                 if ($tok.Contains('=')) { $kv = $tok.Split('=', 2); $defines[$kv[0].Trim()] = $kv[1] }
@@ -931,16 +961,19 @@ function Show-FuncInspectorGui {
                 }
                 elseif ($s.Mode -eq 'switch') {
                     $agg = $s.Result
-                    $swlv.Items.Clear()
+                    $swlv.Rows.Clear()
                     foreach ($name in ($agg.Keys | Sort-Object)) {
                         $info = $agg[$name]
-                        $it = New-Object System.Windows.Forms.ListViewItem([string]$name)
-                        [void]$it.SubItems.Add([string]$info.Count)
-                        [void]$it.SubItems.Add(("{0}:{1}" -f [System.IO.Path]::GetFileName([string]$info.File), $info.Line))
-                        $it.Tag = $info
-                        [void]$swlv.Items.Add($it)
+                        $vals = @((Get-FiSortedValues $info.Values) -split ';' | Where-Object { $_ })
+                        if (-not $vals) { $vals = @('1') }
+                        $loc = ("{0}:{1}" -f [System.IO.Path]::GetFileName([string]$info.File), $info.Line)
+                        $idx = $swlv.Rows.Add($false, [string]$name, $null, $loc)
+                        $cell = $swlv.Rows[$idx].Cells['Val']
+                        foreach ($v in $vals) { [void]$cell.Items.Add([string]$v) }
+                        $cell.Value = $vals[0]
+                        $swlv.Rows[$idx].Tag = $info
                     }
-                    $status.Text = ("完了: {0} 個のスイッチ (ダブルクリックで箇所を開く)" -f $agg.Count)
+                    $status.Text = ("完了: {0} 個のスイッチ (ON で有効化 / 値はプルダウン)" -f $agg.Count)
                 }
                 else {
                     $rows = $s.Result

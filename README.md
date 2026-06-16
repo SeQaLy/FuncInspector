@@ -29,6 +29,9 @@ switch,occurrences,state,filepath,line
 - `occurrences` … `#if`/`#ifdef` 系での出現回数
 - `state` … 現在 ON か OFF か (`-D`/`-U` の指定を反映)
 - `filepath,line` … **最初に登場する箇所** (誤検知かどうかをここで確認できる)
+- `values` … そのスイッチが `#if`/`#elif` で比較されている**値候補** (`;` 区切り)。
+  例: `TOOL_TEST==1` / `#elif TOOL_TEST==2` → `1;2`、`MODE==variable` のように
+  右辺が識別子なら `variable`、`#ifdef`/ブール使用は `1`。GUI ではこれがプルダウンの選択肢。
 
 ## 特徴
 
@@ -56,6 +59,10 @@ switch,occurrences,state,filepath,line
   出ず、`-D TOOL_TEST=1` で出る、`-D TOOL_TEST=2` なら `#if TOOL_TEST==2` 側が出る。
   **GUI ではこのモードが既定 ON**（「選択スイッチのみ有効」チェック）で、値が必要な
   場合は「追加 -D」欄に `TOOL_TEST=2` のように入力します。
+- **スイッチ値のプルダウン (PowerShell GUI)**: スイッチ一覧は表形式 (DataGridView) で、
+  各行に「ON」チェックと「値」プルダウンがあります。プルダウンには `#if` から集めた
+  値候補 (例 `1` / `2`、識別子なら `variable`) が入り、`TOOL_TEST==1` と `==2` の
+  出し分けがその場で選べます。ON にした行の選択値で `-D` 相当の定義が行われます。
 - **ステップ数**: 各関数のステップ数 (本体の実行行数) を表示します。
 - **進捗表示**: GUI は進捗バー＋現在ファイル名、CUI は標準エラーに「処理中 N/総数」を
   表示します。
