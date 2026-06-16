@@ -1055,10 +1055,10 @@ function Show-FuncInspectorGui {
     $lblFn.Text = '関数 (ダブルクリックで開く)'; $lblFn.Location = '322,78'; $lblFn.AutoSize = $true
     $form.Controls.Add($lblFn)
     $lblFnFil = New-Object System.Windows.Forms.Label
-    $lblFnFil.Text = '絞り込み:'; $lblFnFil.Location = '322,101'; $lblFnFil.AutoSize = $true
+    $lblFnFil.Text = '関数名で絞り込み:'; $lblFnFil.Location = '322,101'; $lblFnFil.AutoSize = $true
     $form.Controls.Add($lblFnFil)
     $tbFnFilter = New-Object System.Windows.Forms.TextBox
-    $tbFnFilter.Location = '387,98'; $tbFnFilter.Size = '507,22'; $tbFnFilter.Anchor = 'Top,Left,Right'
+    $tbFnFilter.Location = '440,98'; $tbFnFilter.Size = '454,22'; $tbFnFilter.Anchor = 'Top,Left,Right'
     $form.Controls.Add($tbFnFilter)
 
     $lv = New-Object System.Windows.Forms.ListView
@@ -1168,7 +1168,7 @@ function Show-FuncInspectorGui {
         $timer.Start()
     }
 
-    # 関数一覧の絞り込み表示 (File または Function に部分一致)
+    # 関数一覧の絞り込み表示 (関数名に部分一致)
     function Update-FnView {
         $q = $tbFnFilter.Text.Trim()
         $lv.BeginUpdate()
@@ -1177,9 +1177,8 @@ function Show-FuncInspectorGui {
         foreach ($r in $script:FIguiRows) {
             $tot += $r.Steps
             if ($q) {
-                $f = [string]$r.File; $fn = [string]$r.Function
-                if (($f.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) -and
-                    ($fn.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) { continue }
+                $fn = [string]$r.Function
+                if ($fn.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
             }
             $it = New-Object System.Windows.Forms.ListViewItem([string]$r.File)
             [void]$it.SubItems.Add([string]$r.Line)
