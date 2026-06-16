@@ -287,11 +287,13 @@ def _eval_expr(expr: str, defines: dict) -> int:
 # --------------------------------------------------------------------------
 # プリプロセス (条件コンパイル評価)
 # --------------------------------------------------------------------------
-def preprocess(clean: str, defines: dict, pinned=None) -> str:
+def preprocess(clean: str, defines: dict, pinned=None, external=False) -> str:
     """条件コンパイルを評価し、無効ブロックとディレクティブ行を空行化する。
     行番号を保つため行数は変えない。defines は破壊的に更新され得る (呼び元でコピー)。
     pinned に入った名前は「-D/-U で固定」扱いで、ソース内の #define/#undef では
     上書きされない (コマンドライン優先)。
+    external=True のときは、ソース内の #define/#undef を一切反映しない
+    (スイッチは -D 選択のみで決まる = 「選択した時だけ有効」)。
     """
     if pinned is None:
         pinned = set()
@@ -343,13 +345,13 @@ def preprocess(clean: str, defines: dict, pinned=None) -> str:
                 if stack:
                     stack.pop()
             elif kind == 'define':
-                if emitting():
+                if emitting() and not external:
                     mm = _IDENT.search(rest)
                     if mm and mm.group(0) not in pinned:
                         after = rest[mm.end():].strip()
                         defines[mm.group(0)] = after if after else '1'
             elif kind == 'undef':
-                if emitting():
+                if emitting() and not external:
                     mm = _IDENT.search(rest)
                     if mm and mm.group(0) not in pinned and mm.group(0) in defines:
                         del defines[mm.group(0)]
@@ -474,14 +476,15 @@ def _scan(clean):
     return results
 
 
-def find_functions(src, defines=None, pinned=None):
+def find_functions(src, defines=None, pinned=None, external=False):
     """関数定義を (line, name, steps) のリストで返す。
     defines が None なら条件コンパイルを無視 (全コード有効)。
     dict (空可) を渡すとスイッチ評価を行う。pinned は -D/-U で固定する名前集合。
+    external=True ならソース内 #define/#undef を無視し、スイッチは選択のみで決める。
     """
     clean = strip_comments_strings(src)
     if defines is not None:
-        clean = preprocess(clean, dict(defines), pinned)
+        clean = preprocess(clean, dict(defines), pinned, external)
     return _scan(clean)
 
 
@@ -513,21 +516,22 @@ def _read(path):
         return None
 
 
-def analyze_file(path, defines=None, pinned=None):
+def analyze_file(path, defines=None, pinned=None, external=False):
     src = _read(path)
     if src is None:
         return []
-    return [(path, line, name, steps) for (line, name, steps) in find_functions(src, defines, pinned)]
+    return [(path, line, name, steps)
+            for (line, name, steps) in find_functions(src, defines, pinned, external)]
 
 
-def analyze_paths(paths, exts, defines=None, pinned=None, progress=None):
+def analyze_paths(paths, exts, defines=None, pinned=None, external=False, progress=None):
     files = gather_files(paths, exts)
     total = len(files)
     rows = []
     for idx, fp in enumerate(files, 1):
         if progress:
             progress(idx, total, fp)
-        rows.extend(analyze_file(fp, defines, pinned))
+        rows.extend(analyze_file(fp, defines, pinned, external))
     return rows
 
 
@@ -615,8 +619,17 @@ def run_gui():
     ttk.Label(opt, text="拡張子:").pack(side="left")
     ext_var = tk.StringVar(value=".c,.h")
     ttk.Entry(opt, textvariable=ext_var, width=16).pack(side="left", padx=4)
+    external_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(opt, text="選択スイッチのみ有効(ソース内#defineを無視)",
+                    variable=external_var).pack(side="left", padx=8)
     ignore_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(opt, text="スイッチを無視(全コード有効)", variable=ignore_var).pack(side="left", padx=8)
+    ttk.Checkbutton(opt, text="全コード有効(スイッチ無視)", variable=ignore_var).pack(side="left", padx=8)
+
+    opt2 = ttk.Frame(root, padding=(8, 0))
+    opt2.pack(fill="x")
+    ttk.Label(opt2, text="追加 -D (例: TOOL_TEST=2,FOO):").pack(side="left")
+    extra_def_var = tk.StringVar()
+    ttk.Entry(opt2, textvariable=extra_def_var).pack(side="left", fill="x", expand=True, padx=4)
 
     mid = ttk.Frame(root, padding=8)
     mid.pack(fill="both", expand=True)
@@ -694,9 +707,9 @@ def run_gui():
             w.config(state=st)
 
     # --- ワーカ (別スレッド) ---
-    def worker_scan(p, exts, defines, pinned):
+    def worker_scan(p, exts, defines, pinned, external):
         try:
-            rows = analyze_paths([p], exts, defines, pinned,
+            rows = analyze_paths([p], exts, defines, pinned, external,
                                  progress=lambda i, t, f: q.put(("progress", i, t, f)))
             q.put(("scan_done", rows))
         except Exception as e:  # noqa
@@ -769,11 +782,24 @@ def run_gui():
             messagebox.showwarning("FuncInspector", "フォルダかファイルを指定してください。")
             return
         exts = _parse_exts(ext_var.get())
-        defines = None if ignore_var.get() else selected_defines()
-        pinned = set(defines.keys()) if defines else None
+        if ignore_var.get():
+            defines = None
+            pinned = None
+        else:
+            defines = selected_defines()
+            # 追加 -D (値指定。例: TOOL_TEST=2)
+            for tok in (x.strip() for x in extra_def_var.get().split(',') if x.strip()):
+                if '=' in tok:
+                    nm, val = tok.split('=', 1)
+                    defines[nm.strip()] = val
+                else:
+                    defines[tok] = '1'
+            pinned = set(defines.keys())
+        external = external_var.get()
         set_busy(True)
         status.set("スキャン中...")
-        threading.Thread(target=worker_scan, args=(p, exts, defines, pinned), daemon=True).start()
+        threading.Thread(target=worker_scan, args=(p, exts, defines, pinned, external),
+                         daemon=True).start()
 
     def do_save():
         if not state["rows"]:
@@ -862,6 +888,9 @@ def main(argv=None):
                         help="スイッチを OFF (未定義)。複数指定可")
     parser.add_argument("--ignore-switches", action="store_true",
                         help="条件コンパイルを無視して全コードを対象にする")
+    parser.add_argument("--external-switches", action="store_true",
+                        help="ソース内の #define/#undef を無視し、スイッチは -D 選択のみで決める"
+                             " (選択した時だけ #if ブロックを有効化)")
     args = parser.parse_args(argv)
 
     if args.gui or not args.paths:
@@ -889,7 +918,8 @@ def main(argv=None):
 
     # 関数抽出モード
     use_defines = None if args.ignore_switches else defines
-    rows = analyze_paths(args.paths, exts, use_defines, pinned, progress=_cli_progress)
+    rows = analyze_paths(args.paths, exts, use_defines, pinned,
+                         args.external_switches, progress=_cli_progress)
     _cli_progress_done()
     lines = []
     if not args.no_header:

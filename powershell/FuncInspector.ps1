@@ -27,6 +27,7 @@
 .PARAMETER Define         ON にするスイッチ (-D)。NAME または NAME=VAL。複数可。
 .PARAMETER Undef          OFF にするスイッチ (-U)。複数可。
 .PARAMETER IgnoreSwitches 条件コンパイルを無視して全コードを対象にする。
+.PARAMETER ExternalSwitches ソース内の #define/#undef を無視し、スイッチは -D 選択のみで決める。
 
 .EXAMPLE
     .\FuncInspector.ps1 -Path .\src
@@ -47,7 +48,8 @@ param(
     [switch]$ListSwitches,
     [Alias('D')][string[]]$Define,
     [Alias('U')][string[]]$Undef,
-    [switch]$IgnoreSwitches
+    [switch]$IgnoreSwitches,
+    [switch]$ExternalSwitches
 )
 
 # 本体ロジックを読み込む
@@ -60,7 +62,7 @@ if (-not (Test-Path -LiteralPath $core)) {
 
 # パラメータをそのまま委譲
 $fwd = @{}
-foreach ($k in 'Path', 'Out', 'Extensions', 'NoHeader', 'Gui', 'ListSwitches', 'Define', 'Undef', 'IgnoreSwitches') {
+foreach ($k in 'Path', 'Out', 'Extensions', 'NoHeader', 'Gui', 'ListSwitches', 'Define', 'Undef', 'IgnoreSwitches', 'ExternalSwitches') {
     if ($PSBoundParameters.ContainsKey($k)) { $fwd[$k] = $PSBoundParameters[$k] }
 }
 Invoke-FuncInspector @fwd

@@ -160,11 +160,11 @@ function Initialize-FiNative {
     $script:FiNativeTried = $true
     # 名前空間にバージョンを付与: C# のシグネチャを変えたら必ず番号を上げること。
     # こうすると、同一プロセスに残った旧版の型と衝突せず、更新後の型を必ずコンパイルできる。
-    try { $script:FiNativeType = [FuncInspectorNativeV2.Engine]; return $true } catch {}
+    try { $script:FiNativeType = [FuncInspectorNativeV3.Engine]; return $true } catch {}
     $code = @'
 using System;
 using System.Collections.Generic;
-namespace FuncInspectorNativeV2 {
+namespace FuncInspectorNativeV3 {
   public class Row { public string File; public int Line; public string Function; public int Steps; }
   public class Sw  { public string Name; public int Count; public int Line; }
   public static class Engine {
@@ -271,7 +271,7 @@ namespace FuncInspectorNativeV2 {
     static long EvalIf(char[] b,int s,int e,Dictionary<string,string> defs){
       var p=new Pr(Tokenize(b,s,e),defs); try { return p.Or()!=0?1:0; } catch { return 0; } }
 
-    public static string Preprocess(string clean,Dictionary<string,string> defs,HashSet<string> pinned){
+    public static string Preprocess(string clean,Dictionary<string,string> defs,HashSet<string> pinned,bool external){
       char[] b=clean.ToCharArray(); int n=b.Length;
       var par=new List<bool>(); var tak=new List<bool>(); var act=new List<bool>();
       int ls=0;
@@ -286,8 +286,8 @@ namespace FuncInspectorNativeV2 {
           else if(kind==4){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ bool cond=EvalIf(b,rest,le,defs)!=0; act[idx]=cond; if(cond)tak[idx]=true; } else act[idx]=false; } }
           else if(kind==5){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ act[idx]=true; tak[idx]=true; } else act[idx]=false; } }
           else if(kind==6){ int idx=act.Count-1; if(idx>=0){ par.RemoveAt(idx); tak.RemoveAt(idx); act.RemoveAt(idx); } }
-          else if(kind==7){ if(emit){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null && !pinned.Contains(nm)){ int vs=after; while(vs<le && (b[vs]==' '||b[vs]=='\t')) vs++; int ve=le; while(ve>vs && (b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r')) ve--; string val= ve>vs? new string(b,vs,ve-vs) : "1"; defs[nm]=val; } } }
-          else if(kind==8){ if(emit){ string nm=FirstIdent(b,rest,le); if(nm!=null && !pinned.Contains(nm) && defs.ContainsKey(nm)) defs.Remove(nm); } }
+          else if(kind==7){ if(emit && !external){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null && !pinned.Contains(nm)){ int vs=after; while(vs<le && (b[vs]==' '||b[vs]=='\t')) vs++; int ve=le; while(ve>vs && (b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r')) ve--; string val= ve>vs? new string(b,vs,ve-vs) : "1"; defs[nm]=val; } } }
+          else if(kind==8){ if(emit && !external){ string nm=FirstIdent(b,rest,le); if(nm!=null && !pinned.Contains(nm) && defs.ContainsKey(nm)) defs.Remove(nm); } }
         } else { if(!emit) blank=true; }
         if(blank){ for(int p=ls;p<le;p++) b[p]=' '; }
         if(le>=n) break; ls=le+1;
@@ -327,9 +327,9 @@ namespace FuncInspectorNativeV2 {
       return res;
     }
 
-    public static List<Row> Analyze(string path,string src,Dictionary<string,string> defs,bool ignore,HashSet<string> pinned){
+    public static List<Row> Analyze(string path,string src,Dictionary<string,string> defs,bool ignore,HashSet<string> pinned,bool external){
       string clean=Strip(src);
-      if(!ignore){ var d=new Dictionary<string,string>(defs); clean=Preprocess(clean,d,pinned); }
+      if(!ignore){ var d=new Dictionary<string,string>(defs); clean=Preprocess(clean,d,pinned,external); }
       return Scan(path,clean);
     }
     public static List<Sw> CollectSwitches(string src){
@@ -349,7 +349,7 @@ namespace FuncInspectorNativeV2 {
 '@
     try {
         Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-        $script:FiNativeType = [FuncInspectorNativeV2.Engine]
+        $script:FiNativeType = [FuncInspectorNativeV3.Engine]
         return $true
     }
     catch { Write-Verbose "FiNative コンパイル失敗 (純PSにフォールバック): $_"; return $false }
@@ -447,7 +447,7 @@ function Test-FiEmitting {
 }
 
 function Invoke-FiPreprocess {
-    param([string]$Clean, [hashtable]$Defines, [hashtable]$Pinned = @{})
+    param([string]$Clean, [hashtable]$Defines, [hashtable]$Pinned = @{}, [switch]$External)
     $out = New-Object System.Collections.Generic.List[string]
     $stack = New-Object System.Collections.Generic.List[object]
     foreach ($line in ($Clean -split "`n")) {
@@ -491,7 +491,7 @@ function Invoke-FiPreprocess {
                 }
                 'endif' { if ($stack.Count) { $stack.RemoveAt($stack.Count - 1) } }
                 'define' {
-                    if (Test-FiEmitting $stack) {
+                    if ((Test-FiEmitting $stack) -and -not $External) {
                         $idm = $script:FiRxId.Match($rest)
                         if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value)) {
                             $after = $rest.Substring($idm.Index + $idm.Length).Trim()
@@ -501,7 +501,7 @@ function Invoke-FiPreprocess {
                     }
                 }
                 'undef' {
-                    if (Test-FiEmitting $stack) {
+                    if ((Test-FiEmitting $stack) -and -not $External) {
                         $idm = $script:FiRxId.Match($rest)
                         if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value) -and $Defines.ContainsKey($idm.Value)) { $Defines.Remove($idm.Value) }
                     }
@@ -661,7 +661,8 @@ function Find-CFunctions {
         [Parameter(Mandatory)][string]$FilePath,
         [hashtable]$Defines,
         [string[]]$Pinned,
-        [switch]$IgnoreSwitches
+        [switch]$IgnoreSwitches,
+        [switch]$External
     )
     try { $src = [System.IO.File]::ReadAllText($FilePath) }
     catch { Write-Warning "読み込み失敗: $FilePath"; return @() }
@@ -671,7 +672,7 @@ function Find-CFunctions {
         if ($Defines) { foreach ($k in $Defines.Keys) { $nd[[string]$k] = [string]$Defines[$k] } }
         $np = New-Object 'System.Collections.Generic.HashSet[string]'
         foreach ($p in ($Pinned | Where-Object { $_ })) { [void]$np.Add([string]$p) }
-        return $script:FiNativeType::Analyze($FilePath, $src, $nd, [bool]$IgnoreSwitches, $np)
+        return $script:FiNativeType::Analyze($FilePath, $src, $nd, [bool]$IgnoreSwitches, $np, [bool]$External)
     }
 
     $clean = Remove-FICommentsStrings $src
@@ -679,7 +680,7 @@ function Find-CFunctions {
         $d = if ($Defines) { $Defines.Clone() } else { @{} }
         $pin = @{}
         foreach ($p in ($Pinned | Where-Object { $_ })) { $pin[[string]$p] = $true }
-        $clean = Invoke-FiPreprocess $clean $d $pin
+        $clean = Invoke-FiPreprocess $clean $d $pin -External:$External
     }
     return Get-FiScan $FilePath $clean
 }
@@ -729,15 +730,29 @@ function Show-FuncInspectorGui {
     $tbExt = New-Object System.Windows.Forms.TextBox
     $tbExt.Location = '120,45'; $tbExt.Size = '120,24'; $tbExt.Text = '.c,.h'
     $form.Controls.Add($tbExt)
+    $cbExternal = New-Object System.Windows.Forms.CheckBox
+    $cbExternal.Text = '選択スイッチのみ有効(ソース内#defineを無視)'; $cbExternal.Location = '260,46'; $cbExternal.AutoSize = $true; $cbExternal.Checked = $true
+    $form.Controls.Add($cbExternal)
     $cbIgnore = New-Object System.Windows.Forms.CheckBox
-    $cbIgnore.Text = 'スイッチ無視(全コード有効)'; $cbIgnore.Location = '260,46'; $cbIgnore.AutoSize = $true
+    $cbIgnore.Text = '全コード有効(スイッチ無視)'; $cbIgnore.Location = '560,46'; $cbIgnore.AutoSize = $true
     $form.Controls.Add($cbIgnore)
 
+    $lblXd = New-Object System.Windows.Forms.Label
+    $lblXd.Text = '追加 -D:'; $lblXd.Location = '10,72'; $lblXd.AutoSize = $true
+    $form.Controls.Add($lblXd)
+    $tbXd = New-Object System.Windows.Forms.TextBox
+    $tbXd.Location = '120,69'; $tbXd.Size = '300,24'; $tbXd.Anchor = 'Top,Left'
+    $tbXd.Text = ''
+    $form.Controls.Add($tbXd)
+    $lblXdHint = New-Object System.Windows.Forms.Label
+    $lblXdHint.Text = '(値指定。例 TOOL_TEST=2,FOO)'; $lblXdHint.Location = '430,72'; $lblXdHint.AutoSize = $true
+    $form.Controls.Add($lblXdHint)
+
     $lblSw = New-Object System.Windows.Forms.Label
-    $lblSw.Text = 'スイッチ (チェック=ON / ダブルクリックで箇所を開く)'; $lblSw.Location = '10,80'; $lblSw.AutoSize = $true
+    $lblSw.Text = 'スイッチ (チェック=ON / ダブルクリックで箇所を開く)'; $lblSw.Location = '10,100'; $lblSw.AutoSize = $true
     $form.Controls.Add($lblSw)
     $swlv = New-Object System.Windows.Forms.ListView
-    $swlv.Location = '10,100'; $swlv.Size = '270,430'; $swlv.Anchor = 'Top,Bottom,Left'
+    $swlv.Location = '10,120'; $swlv.Size = '270,410'; $swlv.Anchor = 'Top,Bottom,Left'
     $swlv.View = 'Details'; $swlv.CheckBoxes = $true; $swlv.FullRowSelect = $true; $swlv.GridLines = $true
     [void]$swlv.Columns.Add('Switch', 110)
     [void]$swlv.Columns.Add('件', 35)
@@ -752,7 +767,7 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($btnDetect)
 
     $lv = New-Object System.Windows.Forms.ListView
-    $lv.Location = '290,100'; $lv.Size = '600,430'; $lv.Anchor = 'Top,Bottom,Left,Right'
+    $lv.Location = '290,120'; $lv.Size = '600,410'; $lv.Anchor = 'Top,Bottom,Left,Right'
     $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $true
     [void]$lv.Columns.Add('File', 330)
     [void]$lv.Columns.Add('Line', 55)
@@ -782,7 +797,7 @@ function Show-FuncInspectorGui {
 
     # バックグラウンド実行用スクリプト
     $sbScan = {
-        param($sync, $corePath, $pathArg, $exts, $defines, $ignore)
+        param($sync, $corePath, $pathArg, $exts, $defines, $ignore, $external)
         try {
             . $corePath
             $files = Get-FITargetFiles -Paths @($pathArg) -Exts $exts
@@ -792,7 +807,7 @@ function Show-FuncInspectorGui {
             $pinned = [string[]]$defines.Keys
             foreach ($f in $files) {
                 $i++; $sync.Progress = $i; $sync.Current = $f
-                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore)) { $rows.Add($r) }
+                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore -External:$external)) { $rows.Add($r) }
             }
             $sync.Result = $rows
         } catch { $sync.Error = $_.Exception.Message }
@@ -835,7 +850,12 @@ function Show-FuncInspectorGui {
         else {
             $defines = @{}
             foreach ($it in $swlv.CheckedItems) { $defines[[string]$it.Text] = '1' }
-            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked)
+            # 追加 -D (値指定。例: TOOL_TEST=2,FOO)
+            foreach ($tok in ($tbXd.Text.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+                if ($tok.Contains('=')) { $kv = $tok.Split('=', 2); $defines[$kv[0].Trim()] = $kv[1] }
+                else { $defines[$tok] = '1' }
+            }
+            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument([bool]$cbExternal.Checked)
         }
         $script:FiPS = $ps; $script:FiRS = $rs; $script:FiHandle = $ps.BeginInvoke()
         $timer.Start()
@@ -929,6 +949,7 @@ function Invoke-FuncInspector {
         [Alias('D')][string[]]$Define,
         [Alias('U')][string[]]$Undef,
         [switch]$IgnoreSwitches,
+        [switch]$ExternalSwitches,
         [switch]$AsObject
     )
 
@@ -969,7 +990,7 @@ function Invoke-FuncInspector {
     foreach ($f in $files) {
         $i++
         Write-Progress -Activity 'FuncInspector' -Status ("解析 {0}/{1} {2}" -f $i, $total, $f) -PercentComplete ($(if ($total) { $i * 100 / $total } else { 100 }))
-        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned.ToArray() -IgnoreSwitches:$IgnoreSwitches)) { $rows.Add($r) }
+        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned.ToArray() -IgnoreSwitches:$IgnoreSwitches -External:$ExternalSwitches)) { $rows.Add($r) }
     }
     Write-Progress -Activity 'FuncInspector' -Completed
     if ($AsObject) { return $rows }

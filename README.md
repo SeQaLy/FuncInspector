@@ -49,6 +49,13 @@ switch,occurrences,state,filepath,line
   たとえば `#define TOOL_TEST 0` がソースにあっても `-D TOOL_TEST=1` を付ければ
   `#if TOOL_TEST==1` のブロックが有効になります (ガード無しマクロの what-if 解析が
   そのままできる)。GUI でチェックしたスイッチも同様にピン留めされます。
+- **選択スイッチのみ有効モード (`--external-switches`)**: ソース内の `#define`/`#undef`
+  を**一切無視**し、スイッチは `-D` 選択だけで決めます。これにより
+  「**選択した時だけ `#if` ブロックの関数が出る**」挙動になります。
+  例: ソースに `#define TOOL_TEST 1` があっても、未選択なら `#if TOOL_TEST==1` は
+  出ず、`-D TOOL_TEST=1` で出る、`-D TOOL_TEST=2` なら `#if TOOL_TEST==2` 側が出る。
+  **GUI ではこのモードが既定 ON**（「選択スイッチのみ有効」チェック）で、値が必要な
+  場合は「追加 -D」欄に `TOOL_TEST=2` のように入力します。
 - **ステップ数**: 各関数のステップ数 (本体の実行行数) を表示します。
 - **進捗表示**: GUI は進捗バー＋現在ファイル名、CUI は標準エラーに「処理中 N/総数」を
   表示します。
@@ -82,7 +89,7 @@ python python/func_inspector.py --gui
 ```
 
 オプション: `--out/-o 出力先` `--ext 拡張子` `--no-header` `--gui`
-`--list-switches` `-D NAME[=VAL]` `-U NAME` `--ignore-switches`
+`--list-switches` `-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches`
 
 ## 2. PowerShell 版 (`powershell/FuncInspector.ps1`)
 
@@ -105,7 +112,7 @@ GUI は Windows Forms を使用します (Windows 環境)。
 ```
 
 オプション: `-Out` `-Extensions` `-NoHeader` `-Gui` `-ListSwitches`
-`-D/-Define NAME[,NAME=VAL]` `-U/-Undef NAME` `-IgnoreSwitches`
+`-D/-Define NAME[,NAME=VAL]` `-U/-Undef NAME` `-IgnoreSwitches` `-ExternalSwitches`
 
 実行ポリシーで止まる場合:
 `powershell -ExecutionPolicy Bypass -File .\powershell\FuncInspector.ps1 -Gui`
@@ -156,7 +163,7 @@ cl  /O2 c/func_inspector.c                          # MSVC (Windows)
 ```
 
 オプション: `--out 出力先` `--ext 拡張子` `--no-header` `--list-switches`
-`-D NAME[=VAL]` `-U NAME` `--ignore-switches` `-h/--help`
+`-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `-h/--help`
 
 ## 検出ロジック
 

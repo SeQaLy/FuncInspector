@@ -2,7 +2,7 @@
 
 `python tests/run_tests.py` で再実行できます。各テストは **期待値(アンカー)** と **3実装の相互一致** の両方を検証します。
 
-- 実行日時: 2026-06-16 23:32:36
+- 実行日時: 2026-06-16 23:51:04
 - 検証した実装: Python, C, PowerShell
 - C: gcc でビルドして検証
 - PowerShell: `pwsh.EXE` で検証
@@ -20,6 +20,10 @@
 | `switch-list` | スイッチ一覧: 出現回数と状態 | PASS | PASS | PASS | ✅ |
 | `pin-default` | ピン留め既定: ソース内 #define TOOL_TEST 0 が効き test_only は隠れる | PASS | PASS | PASS | ✅ |
 | `pin-on` | -D TOOL_TEST=1 をピン留め優先: 内蔵 #define TOOL_TEST 0 を無視し test_only を検出 | PASS | PASS | PASS | ✅ |
+| `ext-off` | 既定(cpp準拠): 内蔵 #define TOOL_TEST 1 が効き t1 が出る | PASS | PASS | PASS | ✅ |
+| `ext-none` | --external-switches 未選択: 内蔵 #define を無視 -> always のみ | PASS | PASS | PASS | ✅ |
+| `ext-1` | --external-switches -D TOOL_TEST=1: t1 が出る | PASS | PASS | PASS | ✅ |
+| `ext-2` | --external-switches -D TOOL_TEST=2: t2 が出る (==1 は出ない) | PASS | PASS | PASS | ✅ |
 | `edge-known` | 既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し | PASS | PASS | PASS | ✅ |
 
 ## テストデータと結果の詳細
@@ -92,6 +96,42 @@
 - モード: 関数抽出  オプション: -D TOOL_TEST=1
 - 期待: 2件 → test_only(steps=1), always(steps=1)
 - 実際の検出: L9 test_only (steps=1); L15 always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### ext-off — external.c
+
+- 説明: 既定(cpp準拠): 内蔵 #define TOOL_TEST 1 が効き t1 が出る
+- モード: 関数抽出  オプション: (なし)
+- 期待: 2件 → t1(steps=1), always(steps=1)
+- 非検出を期待: t2
+- 実際の検出: L11 t1 (steps=1); L18 always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### ext-none — external.c
+
+- 説明: --external-switches 未選択: 内蔵 #define を無視 -> always のみ
+- モード: 関数抽出  オプション: (なし)
+- 期待: 1件 → always(steps=1)
+- 非検出を期待: t1, t2
+- 実際の検出: L18 always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### ext-1 — external.c
+
+- 説明: --external-switches -D TOOL_TEST=1: t1 が出る
+- モード: 関数抽出  オプション: -D TOOL_TEST=1
+- 期待: 2件 → t1(steps=1), always(steps=1)
+- 非検出を期待: t2
+- 実際の検出: L11 t1 (steps=1); L18 always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### ext-2 — external.c
+
+- 説明: --external-switches -D TOOL_TEST=2: t2 が出る (==1 は出ない)
+- モード: 関数抽出  オプション: -D TOOL_TEST=2
+- 期待: 2件 → t2(steps=1), always(steps=1)
+- 非検出を期待: t1
+- 実際の検出: L15 t2 (steps=1); L18 always (steps=1)
 - 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
 
 ### edge-known — edge.c
@@ -173,6 +213,29 @@ int b;
 {
     return a + b;
 }
+```
+
+### tests/cases/external.c
+
+```c
+/* external.c - 「選択スイッチのみ有効」(--external-switches) のテスト
+ * ソースは #define TOOL_TEST 1 を直書きしている。
+ *   既定(cpp準拠)           : 内蔵 #define が効き t1, always
+ *   --external 未選択         : #define 無視で TOOL_TEST 未定義 -> always のみ
+ *   --external -D TOOL_TEST=1 : t1, always
+ *   --external -D TOOL_TEST=2 : t2, always (==1 は出ない)
+ */
+#define TOOL_TEST 1
+
+#if TOOL_TEST == 1
+int t1(void) { return 1; }
+#endif
+
+#if TOOL_TEST == 2
+int t2(void) { return 2; }
+#endif
+
+void always(void) { go(); }
 ```
 
 ### tests/cases/pinned.c

@@ -109,6 +109,7 @@ static int   g_ext_count = 0;
 static int   g_header = 1;   /* 既定でヘッダ行を出力 */
 static int   g_list_switches = 0;
 static int   g_ignore_switches = 0;
+static int   g_external = 0;     /* ソース内 #define/#undef を無視 (スイッチは -D のみ) */
 static FILE *g_out = NULL;
 static long  g_func_total = 0;
 static long  g_step_total = 0;
@@ -410,7 +411,7 @@ static void preprocess(char *buf, size_t n, Defs *d) {
                     break; }
                 case D_ENDIF: { if (sp > 0) sp--; break; }
                 case D_DEFINE: {
-                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)
+                    if (emit && !g_external && first_ident(buf, rest, le, nm, sizeof(nm), &after)
                         && !defs_has(&g_pinned, nm)) {
                         size_t vs = after; while (vs < le && (buf[vs]==' '||buf[vs]=='\t')) vs++;
                         size_t ve = le; while (ve > vs && (buf[ve-1]==' '||buf[ve-1]=='\t'||buf[ve-1]=='\r')) ve--;
@@ -420,7 +421,7 @@ static void preprocess(char *buf, size_t n, Defs *d) {
                     }
                     break; }
                 case D_UNDEF: {
-                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)
+                    if (emit && !g_external && first_ident(buf, rest, le, nm, sizeof(nm), &after)
                         && !defs_has(&g_pinned, nm)) defs_remove(d, nm);
                     break; }
             }
@@ -700,6 +701,7 @@ static void usage(const char *prog) {
         "  -D NAME[=VAL]       スイッチを ON (定義)\n"
         "  -U NAME             スイッチを OFF (未定義)\n"
         "  --ignore-switches   条件コンパイルを無視して全コードを対象\n"
+        "  --external-switches ソース内 #define/#undef を無視 (スイッチは -D 選択のみ)\n"
         "  --ext .c,.h         対象拡張子 (既定 .c,.h)\n"
         "  --no-header         先頭のヘッダ行を付けない (既定は付ける)\n"
         "  --out FILE          出力先 (既定 標準出力)\n"
@@ -719,6 +721,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-header")) g_header = 0;
         else if (!strcmp(argv[i], "--list-switches")) g_list_switches = 1;
         else if (!strcmp(argv[i], "--ignore-switches")) g_ignore_switches = 1;
+        else if (!strcmp(argv[i], "--external-switches")) g_external = 1;
         else if (!strcmp(argv[i], "-D") && i + 1 < argc) add_define(argv[++i]);
         else if (!strncmp(argv[i], "-D", 2) && argv[i][2]) add_define(argv[i] + 2);
         else if (!strcmp(argv[i], "-U") && i + 1 < argc) add_undef(argv[++i]);

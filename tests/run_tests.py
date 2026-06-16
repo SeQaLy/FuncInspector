@@ -69,6 +69,22 @@ TESTS = [
          desc="-D TOOL_TEST=1 をピン留め優先: 内蔵 #define TOOL_TEST 0 を無視し test_only を検出",
          expect={"count": 2, "funcs": {"test_only": 1, "always": 1}, "absent": []}),
 
+    dict(id="ext-off", file="external.c", mode="scan", defines=[], ignore=False,
+         desc="既定(cpp準拠): 内蔵 #define TOOL_TEST 1 が効き t1 が出る",
+         expect={"count": 2, "funcs": {"t1": 1, "always": 1}, "absent": ["t2"]}),
+
+    dict(id="ext-none", file="external.c", mode="scan", defines=[], ignore=False, external=True,
+         desc="--external-switches 未選択: 内蔵 #define を無視 -> always のみ",
+         expect={"count": 1, "funcs": {"always": 1}, "absent": ["t1", "t2"]}),
+
+    dict(id="ext-1", file="external.c", mode="scan", defines=["TOOL_TEST=1"], ignore=False, external=True,
+         desc="--external-switches -D TOOL_TEST=1: t1 が出る",
+         expect={"count": 2, "funcs": {"t1": 1, "always": 1}, "absent": ["t2"]}),
+
+    dict(id="ext-2", file="external.c", mode="scan", defines=["TOOL_TEST=2"], ignore=False, external=True,
+         desc="--external-switches -D TOOL_TEST=2: t2 が出る (==1 は出ない)",
+         expect={"count": 2, "funcs": {"t2": 1, "always": 1}, "absent": ["t1"]}),
+
     dict(id="edge-known", file="edge.c", mode="scan", defines=[], ignore=False,
          desc="既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し",
          expect={"count": 1, "funcs": {"DEFINE_HANDLER": 1},
@@ -119,6 +135,8 @@ def run_ps(ps, t):
         a += ["-D", ",".join(t["defines"])]
     if t["ignore"]:
         a += ["-IgnoreSwitches"]
+    if t.get("external"):
+        a += ["-ExternalSwitches"]
     return _run(a)
 
 
@@ -131,6 +149,8 @@ def _flags_common(t):
         a += ["-D", d]
     if t["ignore"]:
         a += ["--ignore-switches"]
+    if t.get("external"):
+        a += ["--external-switches"]
     return a
 
 
