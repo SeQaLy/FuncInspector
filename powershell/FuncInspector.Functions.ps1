@@ -147,6 +147,18 @@ if (-not (Get-Variable -Name FuncInspectorKeywords -Scope Script -ErrorAction Si
 }
 $script:FiRxDir = [regex]'^\s*#\s*(ifdef|ifndef|if|elif|else|endif|define|undef)\b(.*)$'
 $script:FiRxId = [regex]'[A-Za-z_]\w*'
+# このファイル自身のパス (GUI のバックグラウンド runspace から再読込するため)
+$script:FiScriptPath = $PSCommandPath
+
+function Open-FiLocation {
+    <# ファイルの該当行を開く (VS Code 優先、無ければ OS 既定アプリ)。 #>
+    param([string]$File, [int]$Line)
+    $code = Get-Command code -ErrorAction SilentlyContinue
+    if ($code) {
+        try { & $code.Source -g ("{0}:{1}" -f $File, $Line); return } catch {}
+    }
+    try { Invoke-Item -LiteralPath $File } catch { Write-Warning "開けませんでした: $File" }
+}
 
 function Remove-FICommentsStrings {
     param([string]$Src)
@@ -299,30 +311,53 @@ function Invoke-FiPreprocess {
     return ($out -join "`n")
 }
 
-function Get-CSwitch {
-    <# 指定パスのコンパイルスイッチ名 -> 出現回数 を返す。 #>
-    param([string[]]$Path, [string[]]$Extensions = @('.c', '.h'))
-    $counts = @{}
-    foreach ($f in (Get-FITargetFiles -Paths $Path -Exts $Extensions)) {
-        try { $src = [System.IO.File]::ReadAllText($f) } catch { continue }
-        $clean = Remove-FICommentsStrings $src
-        foreach ($line in ($clean -split "`n")) {
-            $m = $script:FiRxDir.Match($line)
-            if (-not $m.Success) { continue }
-            $kind = $m.Groups[1].Value; $rest = $m.Groups[2].Value
-            if ($kind -eq 'ifdef' -or $kind -eq 'ifndef') {
-                $idm = $script:FiRxId.Match($rest)
-                if ($idm.Success) { $counts[$idm.Value] = ([int]$counts[$idm.Value]) + 1 }
+function Get-FiFileSwitches {
+    <# 1ファイルのスイッチ名 -> @{Count;Line(初出)} を返す。 #>
+    param([string]$FilePath)
+    $res = @{}
+    try { $src = [System.IO.File]::ReadAllText($FilePath) } catch { return $res }
+    $clean = Remove-FICommentsStrings $src
+    $ln = 0
+    foreach ($line in ($clean -split "`n")) {
+        $ln++
+        $m = $script:FiRxDir.Match($line)
+        if (-not $m.Success) { continue }
+        $kind = $m.Groups[1].Value; $rest = $m.Groups[2].Value
+        if ($kind -eq 'ifdef' -or $kind -eq 'ifndef') {
+            $idm = $script:FiRxId.Match($rest)
+            if ($idm.Success) {
+                if ($res.ContainsKey($idm.Value)) { $res[$idm.Value].Count++ }
+                else { $res[$idm.Value] = @{ Count = 1; Line = $ln } }
             }
-            elseif ($kind -eq 'if' -or $kind -eq 'elif') {
-                foreach ($im in $script:FiRxId.Matches($rest)) {
-                    if ($im.Value -eq 'defined') { continue }
-                    $counts[$im.Value] = ([int]$counts[$im.Value]) + 1
-                }
+        }
+        elseif ($kind -eq 'if' -or $kind -eq 'elif') {
+            foreach ($im in $script:FiRxId.Matches($rest)) {
+                if ($im.Value -eq 'defined') { continue }
+                if ($res.ContainsKey($im.Value)) { $res[$im.Value].Count++ }
+                else { $res[$im.Value] = @{ Count = 1; Line = $ln } }
             }
         }
     }
-    return $counts
+    return $res
+}
+
+function Get-CSwitch {
+    <# 指定パスのスイッチ名 -> @{Count;File;Line}。File/Line は最初の出現箇所。 #>
+    param([string[]]$Path, [string[]]$Extensions = @('.c', '.h'))
+    $agg = @{}
+    $files = Get-FITargetFiles -Paths $Path -Exts $Extensions
+    $total = $files.Count; $i = 0
+    foreach ($f in $files) {
+        $i++
+        Write-Progress -Activity 'FuncInspector' -Status ("スイッチ検出 {0}/{1} {2}" -f $i, $total, $f) -PercentComplete ($(if ($total) { $i * 100 / $total } else { 100 }))
+        $fs = Get-FiFileSwitches -FilePath $f
+        foreach ($name in $fs.Keys) {
+            if ($agg.ContainsKey($name)) { $agg[$name].Count += $fs[$name].Count }
+            else { $agg[$name] = [pscustomobject]@{ Count = $fs[$name].Count; File = $f; Line = $fs[$name].Line } }
+        }
+    }
+    Write-Progress -Activity 'FuncInspector' -Completed
+    return $agg
 }
 
 function Test-FIIdentStart([char]$c) { return ([char]::IsLetter($c) -or $c -eq '_') }
@@ -450,21 +485,21 @@ function Show-FuncInspectorGui {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'FuncInspector - C 関数名抽出'
-    $form.Size = New-Object System.Drawing.Size(900, 600)
+    $form.Size = New-Object System.Drawing.Size(920, 650)
     $form.StartPosition = 'CenterScreen'
 
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Text = 'フォルダ/ファイル:'; $lbl.Location = '10,15'; $lbl.AutoSize = $true
     $form.Controls.Add($lbl)
     $tb = New-Object System.Windows.Forms.TextBox
-    $tb.Location = '120,12'; $tb.Size = '550,24'; $tb.Anchor = 'Top,Left,Right'
+    $tb.Location = '120,12'; $tb.Size = '560,24'; $tb.Anchor = 'Top,Left,Right'
     $form.Controls.Add($tb)
     $btnFolder = New-Object System.Windows.Forms.Button
-    $btnFolder.Text = 'フォルダ...'; $btnFolder.Location = '680,11'; $btnFolder.Size = '90,25'; $btnFolder.Anchor = 'Top,Right'
+    $btnFolder.Text = 'フォルダ...'; $btnFolder.Location = '690,11'; $btnFolder.Size = '90,25'; $btnFolder.Anchor = 'Top,Right'
     $btnFolder.Add_Click({ $dlg = New-Object System.Windows.Forms.FolderBrowserDialog; if ($dlg.ShowDialog() -eq 'OK') { $tb.Text = $dlg.SelectedPath } })
     $form.Controls.Add($btnFolder)
     $btnFile = New-Object System.Windows.Forms.Button
-    $btnFile.Text = 'ファイル...'; $btnFile.Location = '775,11'; $btnFile.Size = '90,25'; $btnFile.Anchor = 'Top,Right'
+    $btnFile.Text = 'ファイル...'; $btnFile.Location = '785,11'; $btnFile.Size = '90,25'; $btnFile.Anchor = 'Top,Right'
     $btnFile.Add_Click({ $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = 'C source|*.c;*.h|All|*.*'; if ($dlg.ShowDialog() -eq 'OK') { $tb.Text = $dlg.FileName } })
     $form.Controls.Add($btnFile)
 
@@ -479,70 +514,163 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($cbIgnore)
 
     $lblSw = New-Object System.Windows.Forms.Label
-    $lblSw.Text = 'スイッチ (チェック=ON)'; $lblSw.Location = '10,80'; $lblSw.AutoSize = $true
+    $lblSw.Text = 'スイッチ (チェック=ON / ダブルクリックで箇所を開く)'; $lblSw.Location = '10,80'; $lblSw.AutoSize = $true
     $form.Controls.Add($lblSw)
-    $clb = New-Object System.Windows.Forms.CheckedListBox
-    $clb.Location = '10,100'; $clb.Size = '220,400'; $clb.Anchor = 'Top,Bottom,Left'; $clb.CheckOnClick = $true
-    $form.Controls.Add($clb)
+    $swlv = New-Object System.Windows.Forms.ListView
+    $swlv.Location = '10,100'; $swlv.Size = '270,430'; $swlv.Anchor = 'Top,Bottom,Left'
+    $swlv.View = 'Details'; $swlv.CheckBoxes = $true; $swlv.FullRowSelect = $true; $swlv.GridLines = $true
+    [void]$swlv.Columns.Add('Switch', 110)
+    [void]$swlv.Columns.Add('件', 35)
+    [void]$swlv.Columns.Add('初出', 105)
+    $swlv.Add_DoubleClick({
+            if ($swlv.SelectedItems.Count -gt 0) { $info = $swlv.SelectedItems[0].Tag; if ($info) { Open-FiLocation $info.File ([int]$info.Line) } }
+        })
+    $form.Controls.Add($swlv)
+
     $btnDetect = New-Object System.Windows.Forms.Button
-    $btnDetect.Text = 'スイッチ検出'; $btnDetect.Location = '10,505'; $btnDetect.Size = '220,26'; $btnDetect.Anchor = 'Bottom,Left'
+    $btnDetect.Text = 'スイッチ検出'; $btnDetect.Location = '10,535'; $btnDetect.Size = '270,26'; $btnDetect.Anchor = 'Bottom,Left'
     $form.Controls.Add($btnDetect)
 
     $lv = New-Object System.Windows.Forms.ListView
-    $lv.Location = '245,100'; $lv.Size = '630,400'; $lv.Anchor = 'Top,Bottom,Left,Right'
+    $lv.Location = '290,100'; $lv.Size = '600,430'; $lv.Anchor = 'Top,Bottom,Left,Right'
     $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $true
-    [void]$lv.Columns.Add('File', 350)
+    [void]$lv.Columns.Add('File', 330)
     [void]$lv.Columns.Add('Line', 55)
-    [void]$lv.Columns.Add('Function', 160)
+    [void]$lv.Columns.Add('Function', 150)
     [void]$lv.Columns.Add('Steps', 55)
+    $lv.Add_DoubleClick({
+            if ($lv.SelectedItems.Count -gt 0) { $r = $lv.SelectedItems[0]; Open-FiLocation $r.Text ([int]$r.SubItems[1].Text) }
+        })
     $form.Controls.Add($lv)
 
+    $pb = New-Object System.Windows.Forms.ProgressBar
+    $pb.Location = '290,538'; $pb.Size = '360,18'; $pb.Anchor = 'Bottom,Left'; $pb.Minimum = 0; $pb.Maximum = 1
+    $form.Controls.Add($pb)
     $status = New-Object System.Windows.Forms.Label
-    $status.Location = '245,505'; $status.Size = '420,20'; $status.Text = '準備完了'; $status.Anchor = 'Bottom,Left'
+    $status.Location = '290,560'; $status.Size = '520,20'; $status.Text = '準備完了'; $status.Anchor = 'Bottom,Left'
     $form.Controls.Add($status)
 
-    $script:FIguiRows = @()
-
-    $btnDetect.Add_Click({
-            if (-not $tb.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show('フォルダかファイルを指定してください。') | Out-Null; return }
-            $exts = $tbExt.Text.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            if (-not $exts) { $exts = @('.c', '.h') }
-            $counts = Get-CSwitch -Path @($tb.Text.Trim()) -Extensions $exts
-            $clb.Items.Clear()
-            foreach ($name in ($counts.Keys | Sort-Object)) { [void]$clb.Items.Add(("{0}  (x{1})" -f $name, $counts[$name])) }
-            $status.Text = ("{0} 個のスイッチを検出" -f $counts.Count)
-        })
-
     $btnScan = New-Object System.Windows.Forms.Button
-    $btnScan.Text = 'スキャン'; $btnScan.Location = '680,505'; $btnScan.Size = '90,28'; $btnScan.Anchor = 'Bottom,Right'
-    $btnScan.Add_Click({
-            if (-not $tb.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show('フォルダかファイルを指定してください。') | Out-Null; return }
-            $exts = $tbExt.Text.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            if (-not $exts) { $exts = @('.c', '.h') }
-            $defines = @{}
-            foreach ($it in $clb.CheckedItems) { $defines[([string]$it).Split(' ')[0]] = '1' }
-            $ignore = $cbIgnore.Checked
+    $btnScan.Text = 'スキャン'; $btnScan.Location = '670,535'; $btnScan.Size = '95,28'; $btnScan.Anchor = 'Bottom,Right'
+    $form.Controls.Add($btnScan)
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = 'CSV 保存'; $btnSave.Location = '775,535'; $btnSave.Size = '100,28'; $btnSave.Anchor = 'Bottom,Right'
+    $form.Controls.Add($btnSave)
+
+    $script:FIguiRows = @()
+    $script:FiSync = $null; $script:FiPS = $null; $script:FiRS = $null; $script:FiHandle = $null
+
+    # バックグラウンド実行用スクリプト
+    $sbScan = {
+        param($sync, $corePath, $pathArg, $exts, $defines, $ignore)
+        try {
+            . $corePath
+            $files = Get-FITargetFiles -Paths @($pathArg) -Exts $exts
+            $sync.Total = $files.Count
             $rows = New-Object System.Collections.Generic.List[object]
-            foreach ($f in (Get-FITargetFiles -Paths @($tb.Text.Trim()) -Exts $exts)) {
+            $i = 0
+            foreach ($f in $files) {
+                $i++; $sync.Progress = $i; $sync.Current = $f
                 foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -IgnoreSwitches:$ignore)) { $rows.Add($r) }
             }
-            $script:FIguiRows = $rows
-            $lv.Items.Clear()
-            $tot = 0
-            foreach ($r in $rows) {
-                $it = New-Object System.Windows.Forms.ListViewItem($r.File)
-                [void]$it.SubItems.Add([string]$r.Line)
-                [void]$it.SubItems.Add($r.Function)
-                [void]$it.SubItems.Add([string]$r.Steps)
-                [void]$lv.Items.Add($it)
-                $tot += $r.Steps
+            $sync.Result = $rows
+        } catch { $sync.Error = $_.Exception.Message }
+        finally { $sync.Done = $true }
+    }
+    $sbSwitch = {
+        param($sync, $corePath, $pathArg, $exts)
+        try {
+            . $corePath
+            $files = Get-FITargetFiles -Paths @($pathArg) -Exts $exts
+            $sync.Total = $files.Count
+            $agg = @{}
+            $i = 0
+            foreach ($f in $files) {
+                $i++; $sync.Progress = $i; $sync.Current = $f
+                $fs = Get-FiFileSwitches -FilePath $f
+                foreach ($name in $fs.Keys) {
+                    if ($agg.ContainsKey($name)) { $agg[$name].Count += $fs[$name].Count }
+                    else { $agg[$name] = [pscustomobject]@{ Count = $fs[$name].Count; File = $f; Line = $fs[$name].Line } }
+                }
             }
-            $status.Text = ("{0} 関数 / 合計 {1} ステップ" -f $rows.Count, $tot)
-        })
-    $form.Controls.Add($btnScan)
+            $sync.Result = $agg
+        } catch { $sync.Error = $_.Exception.Message }
+        finally { $sync.Done = $true }
+    }
 
-    $btnSave = New-Object System.Windows.Forms.Button
-    $btnSave.Text = 'CSV 保存'; $btnSave.Location = '780,505'; $btnSave.Size = '95,28'; $btnSave.Anchor = 'Bottom,Right'
+    function StartBg([string]$mode) {
+        if (-not $tb.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show('フォルダかファイルを指定してください。') | Out-Null; return }
+        if (-not $script:FiScriptPath) { [System.Windows.Forms.MessageBox]::Show('コアスクリプトのパスが取得できませんでした。') | Out-Null; return }
+        $exts = $tbExt.Text.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        if (-not $exts) { $exts = @('.c', '.h') }
+        $script:FiSync = [hashtable]::Synchronized(@{ Progress = 0; Total = 0; Current = ''; Done = $false; Result = $null; Error = $null; Mode = $mode })
+        $btnScan.Enabled = $false; $btnDetect.Enabled = $false; $btnSave.Enabled = $false
+        $pb.Value = 0; $status.Text = '開始...'
+        $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState = 'STA'; $rs.ThreadOptions = 'ReuseThread'; $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        if ($mode -eq 'switch') {
+            [void]$ps.AddScript($sbSwitch.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts)
+        }
+        else {
+            $defines = @{}
+            foreach ($it in $swlv.CheckedItems) { $defines[[string]$it.Text] = '1' }
+            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked)
+        }
+        $script:FiPS = $ps; $script:FiRS = $rs; $script:FiHandle = $ps.BeginInvoke()
+        $timer.Start()
+    }
+
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 100
+    $timer.Add_Tick({
+            $s = $script:FiSync
+            if ($null -eq $s) { return }
+            if ([int]$s.Total -gt 0) { $pb.Maximum = [int]$s.Total; $pb.Value = [Math]::Min([int]$s.Progress, [int]$s.Total) }
+            $cur = if ($s.Current) { [System.IO.Path]::GetFileName([string]$s.Current) } else { '' }
+            $status.Text = ("処理中... {0}/{1}  {2}" -f $s.Progress, $s.Total, $cur)
+            if ($s.Done) {
+                $timer.Stop()
+                try { $script:FiPS.EndInvoke($script:FiHandle) } catch {}
+                if ($script:FiPS) { $script:FiPS.Dispose() }
+                if ($script:FiRS) { $script:FiRS.Dispose() }
+                if ($s.Error) {
+                    [System.Windows.Forms.MessageBox]::Show([string]$s.Error) | Out-Null
+                    $status.Text = 'エラー'
+                }
+                elseif ($s.Mode -eq 'switch') {
+                    $agg = $s.Result
+                    $swlv.Items.Clear()
+                    foreach ($name in ($agg.Keys | Sort-Object)) {
+                        $info = $agg[$name]
+                        $it = New-Object System.Windows.Forms.ListViewItem([string]$name)
+                        [void]$it.SubItems.Add([string]$info.Count)
+                        [void]$it.SubItems.Add(("{0}:{1}" -f [System.IO.Path]::GetFileName([string]$info.File), $info.Line))
+                        $it.Tag = $info
+                        [void]$swlv.Items.Add($it)
+                    }
+                    $status.Text = ("完了: {0} 個のスイッチ (ダブルクリックで箇所を開く)" -f $agg.Count)
+                }
+                else {
+                    $rows = $s.Result
+                    $script:FIguiRows = $rows
+                    $lv.Items.Clear(); $tot = 0
+                    foreach ($r in $rows) {
+                        $it = New-Object System.Windows.Forms.ListViewItem([string]$r.File)
+                        [void]$it.SubItems.Add([string]$r.Line)
+                        [void]$it.SubItems.Add([string]$r.Function)
+                        [void]$it.SubItems.Add([string]$r.Steps)
+                        [void]$lv.Items.Add($it)
+                        $tot += $r.Steps
+                    }
+                    $status.Text = ("完了: {0} 関数 / 合計 {1} ステップ (ダブルクリックで開く)" -f $rows.Count, $tot)
+                }
+                $pb.Value = 0
+                $btnScan.Enabled = $true; $btnDetect.Enabled = $true; $btnSave.Enabled = $true
+            }
+        })
+
+    $btnDetect.Add_Click({ StartBg 'switch' })
+    $btnScan.Add_Click({ StartBg 'scan' })
     $btnSave.Add_Click({
             if (-not $script:FIguiRows -or $script:FIguiRows.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('先にスキャンしてください。') | Out-Null; return }
             $dlg = New-Object System.Windows.Forms.SaveFileDialog
@@ -554,8 +682,9 @@ function Show-FuncInspectorGui {
                 $status.Text = ("保存しました: {0}" -f $dlg.FileName)
             }
         })
-    $form.Controls.Add($btnSave)
 
+    $form.Add_FormClosed({ if ($script:FiTimer) { $script:FiTimer.Stop() } })
+    $script:FiTimer = $timer
     [void]$form.ShowDialog()
 }
 
@@ -593,27 +722,32 @@ function Invoke-FuncInspector {
 
     # スイッチ一覧モード
     if ($ListSwitches) {
-        $counts = Get-CSwitch -Path $Path -Extensions $Extensions
-        $rows = foreach ($name in ($counts.Keys | Sort-Object)) {
+        $agg = Get-CSwitch -Path $Path -Extensions $Extensions
+        $rows = foreach ($name in ($agg.Keys | Sort-Object)) {
             $st = if ($defines.ContainsKey($name)) { 'ON' } else { 'OFF' }
-            [pscustomobject]@{ Switch = $name; Occurrences = $counts[$name]; State = $st }
+            [pscustomobject]@{ Switch = $name; Occurrences = $agg[$name].Count; State = $st; File = $agg[$name].File; Line = $agg[$name].Line }
         }
         if ($AsObject) { return $rows }
         $lines = New-Object System.Collections.Generic.List[string]
-        if ($Header) { $lines.Add('switch,occurrences,state') }
-        foreach ($r in $rows) { $lines.Add(("{0},{1},{2}" -f $r.Switch, $r.Occurrences, $r.State)) }
+        if ($Header) { $lines.Add('switch,occurrences,state,file,line') }
+        foreach ($r in $rows) { $lines.Add(("{0},{1},{2},{3},{4}" -f $r.Switch, $r.Occurrences, $r.State, $r.File, $r.Line)) }
         $text = [string]::Join("`r`n", $lines)
         if ($Out) { [System.IO.File]::WriteAllText($Out, $text + "`r`n", [System.Text.Encoding]::UTF8); Write-Host ("{0} に書き出しました" -f $Out) }
         elseif ($text) { Write-Output $text }
-        Write-Host ("{0} 個のスイッチ" -f $counts.Count) -ForegroundColor DarkGray
+        Write-Host ("{0} 個のスイッチ" -f $agg.Count) -ForegroundColor DarkGray
         return
     }
 
     # 関数抽出モード
     $rows = New-Object System.Collections.Generic.List[object]
-    foreach ($f in (Get-FITargetFiles -Paths $Path -Exts $Extensions)) {
+    $files = Get-FITargetFiles -Paths $Path -Exts $Extensions
+    $total = $files.Count; $i = 0
+    foreach ($f in $files) {
+        $i++
+        Write-Progress -Activity 'FuncInspector' -Status ("解析 {0}/{1} {2}" -f $i, $total, $f) -PercentComplete ($(if ($total) { $i * 100 / $total } else { 100 }))
         foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -IgnoreSwitches:$IgnoreSwitches)) { $rows.Add($r) }
     }
+    Write-Progress -Activity 'FuncInspector' -Completed
     if ($AsObject) { return $rows }
 
     $lines = New-Object System.Collections.Generic.List[string]

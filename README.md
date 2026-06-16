@@ -17,12 +17,13 @@ file.c,line,funcname,steps
 スイッチ一覧モード (`--list-switches`) の出力:
 
 ```
-switch,occurrences,state
+switch,occurrences,state,file,line
 ```
 
 - `switch` … コンパイルスイッチ名
 - `occurrences` … `#if`/`#ifdef` 系での出現回数
 - `state` … 現在 ON か OFF か (`-D`/`-U` の指定を反映)
+- `file,line` … **最初に登場する箇所** (誤検知かどうかをここで確認できる)
 
 ## 特徴
 
@@ -39,6 +40,14 @@ switch,occurrences,state
   (`defined()`, 比較, `&&`/`||`, 算術) も評価します。条件を無視して全コードを
   対象にするには `--ignore-switches`。
 - **ステップ数**: 各関数のステップ数 (本体の実行行数) を表示します。
+- **進捗表示**: GUI は進捗バー＋現在ファイル名、CUI は標準エラーに「処理中 N/総数」を
+  表示します。
+- **バックグラウンド実行**: GUI のスキャン/スイッチ検出は別スレッド (Python は
+  threading、PowerShell は runspace) で動くので、処理中も画面が固まりません。
+- **スイッチ箇所を開く**: GUI でスイッチ行をダブルクリックすると最初の登場箇所を
+  エディタで開けます (VS Code の `code` コマンドがあれば該当行へジャンプ、無ければ
+  既定アプリ)。結果一覧の関数行もダブルクリックで開けます。CUI は出力の `file,line`
+  列で場所を確認できます。
 - **GUI と CUI の両方**: PowerShell 版と Python 版は GUI でフォルダ/ファイル選択、
   スイッチのチェック ON/OFF、ステップ数表示ができます。C 版は CUI のみです。
 
@@ -169,13 +178,13 @@ tests/sample.c,58,feature_legacy,1
 tests/sample.c,64,main,2
 ```
 
-スイッチ一覧:
+スイッチ一覧 (初出箇所つき):
 
 ```
-switch,occurrences,state
-CFG_A,2,OFF
-CFG_B,1,OFF
-VER,1,OFF
+switch,occurrences,state,file,line
+CFG_A,2,OFF,tests/sample.c,33
+CFG_B,1,OFF,tests/sample.c,52
+VER,1,OFF,tests/sample.c,47
 ```
 
 `-D CFG_A` を付けると `feature_default` が消え `feature_a` が現れる、のように

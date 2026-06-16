@@ -113,6 +113,19 @@ static FILE *g_out = NULL;
 static long  g_func_total = 0;
 static long  g_step_total = 0;
 static Defs  g_defines;
+static long  g_file_total = 0;   /* 進捗表示用: 対象ファイル総数 */
+static long  g_file_idx = 0;     /* 進捗表示用: 処理済み数 */
+
+/* 進捗を stderr に上書き表示 (stdout の出力は汚さない) */
+static void progress_tick(const char *path) {
+    g_file_idx++;
+    const char *base = strrchr(path, '/');
+    const char *bsl = strrchr(path, '\\');
+    if (bsl && (!base || bsl > base)) base = bsl;
+    base = base ? base + 1 : path;
+    fprintf(stderr, "\r処理中 %ld/%ld %-48.48s", g_file_idx, g_file_total, base);
+    fflush(stderr);
+}
 
 /* ---- コメント/文字列の除去 (in-place) ----------------------------------- */
 static void strip_comments_strings(char *buf, size_t n) {
@@ -512,31 +525,35 @@ static void scan_functions(const char *path, const char *buf, size_t n) {
 }
 
 /* ---- スイッチ収集 -------------------------------------------------------- */
-typedef struct { char name[128]; int count; } SwEntry;
+typedef struct { char name[128]; int count; char file[1024]; long line; } SwEntry;
 typedef struct { SwEntry *items; int count, cap; } SwSet;
 static void sw_init(SwSet *s) { s->items = NULL; s->count = 0; s->cap = 0; }
-static void sw_add(SwSet *s, const char *name) {
-    for (int i = 0; i < s->count; ++i) if (strcmp(s->items[i].name, name) == 0) { s->items[i].count++; return; }
+static void sw_add(SwSet *s, const char *name, const char *file, long line) {
+    for (int i = 0; i < s->count; ++i)
+        if (strcmp(s->items[i].name, name) == 0) { s->items[i].count++; return; }
     if (s->count == s->cap) {
         s->cap = s->cap ? s->cap * 2 : 32;
         s->items = realloc(s->items, s->cap * sizeof(SwEntry));
     }
-    strncpy(s->items[s->count].name, name, 127); s->items[s->count].name[127] = '\0';
-    s->items[s->count].count = 1; s->count++;
+    SwEntry *e = &s->items[s->count];
+    strncpy(e->name, name, 127); e->name[127] = '\0';
+    strncpy(e->file, file, sizeof(e->file) - 1); e->file[sizeof(e->file) - 1] = '\0';
+    e->line = line; e->count = 1; s->count++;
 }
 static void sw_free(SwSet *s) { free(s->items); sw_init(s); }
 static int sw_cmp(const void *a, const void *b) {
     return strcmp(((const SwEntry *)a)->name, ((const SwEntry *)b)->name);
 }
 
-static void collect_switches(const char *buf, size_t n, SwSet *sw) {
-    size_t ls = 0;
+static void collect_switches(const char *buf, size_t n, SwSet *sw, const char *path) {
+    size_t ls = 0; long lineno = 0;
     while (ls <= n) {
+        lineno++;
         size_t le = ls; while (le < n && buf[le] != '\n') le++;
         size_t rest; int kind = parse_directive(buf, ls, le, &rest);
         if (kind == D_IFDEF || kind == D_IFNDEF) {
             char nm[64]; size_t after;
-            if (first_ident(buf, rest, le, nm, sizeof(nm), &after)) sw_add(sw, nm);
+            if (first_ident(buf, rest, le, nm, sizeof(nm), &after)) sw_add(sw, nm, path, lineno);
         } else if (kind == D_IF || kind == D_ELIF) {
             size_t p = rest;
             while (p < le) {
@@ -544,7 +561,7 @@ static void collect_switches(const char *buf, size_t n, SwSet *sw) {
                     size_t s2 = p; while (p < le && ident_char((unsigned char)buf[p])) p++;
                     size_t l2 = p - s2; char nm[64]; if (l2 >= sizeof(nm)) l2 = sizeof(nm)-1;
                     memcpy(nm, buf + s2, l2); nm[l2] = '\0';
-                    if (strcmp(nm, "defined") != 0) sw_add(sw, nm);
+                    if (strcmp(nm, "defined") != 0) sw_add(sw, nm, path, lineno);
                 } else p++;
             }
         }
@@ -582,7 +599,7 @@ static void list_switches_file(const char *path, SwSet *sw) {
     size_t n; char *buf = read_file(path, &n);
     if (!buf) return;
     strip_comments_strings(buf, n);
-    collect_switches(buf, n, sw);
+    collect_switches(buf, n, sw, path);
     free(buf);
 }
 
@@ -636,8 +653,9 @@ static void walk(const char *path, void (*cb)(const char *, void *), void *ctx) 
     }
 }
 
-static void cb_analyze(const char *path, void *ctx) { (void)ctx; analyze_file(path); }
-static void cb_switches(const char *path, void *ctx) { list_switches_file(path, (SwSet *)ctx); }
+static void cb_count(const char *path, void *ctx) { (void)path; (*(long *)ctx)++; }
+static void cb_analyze(const char *path, void *ctx) { (void)ctx; progress_tick(path); analyze_file(path); }
+static void cb_switches(const char *path, void *ctx) { progress_tick(path); list_switches_file(path, (SwSet *)ctx); }
 
 /* ---- 引数 / main -------------------------------------------------------- */
 static void add_exts(const char *csv) {
@@ -703,20 +721,27 @@ int main(int argc, char **argv) {
     g_out = stdout;
     if (outfile) { g_out = fopen(outfile, "w"); if (!g_out) { fprintf(stderr, "error: cannot open %s\n", outfile); return 1; } }
 
+    /* 進捗表示用に対象ファイル総数を先に数える */
+    g_file_total = 0; g_file_idx = 0;
+    for (int i = 0; i < npaths; ++i) walk(paths[i], cb_count, &g_file_total);
+
     if (g_list_switches) {
         SwSet sw; sw_init(&sw);
         for (int i = 0; i < npaths; ++i) walk(paths[i], cb_switches, &sw);
+        fprintf(stderr, "\r%-70s\r", "");   /* 進捗行をクリア */
         qsort(sw.items, sw.count, sizeof(SwEntry), sw_cmp);
-        if (g_header) fprintf(g_out, "switch,occurrences,state\n");
+        if (g_header) fprintf(g_out, "switch,occurrences,state,file,line\n");
         for (int i = 0; i < sw.count; ++i) {
-            fprintf(g_out, "%s,%d,%s\n", sw.items[i].name, sw.items[i].count,
-                    defs_has(&g_defines, sw.items[i].name) ? "ON" : "OFF");
+            fprintf(g_out, "%s,%d,%s,%s,%ld\n", sw.items[i].name, sw.items[i].count,
+                    defs_has(&g_defines, sw.items[i].name) ? "ON" : "OFF",
+                    sw.items[i].file, sw.items[i].line);
         }
         fprintf(stderr, "%d 個のスイッチ\n", sw.count);
         sw_free(&sw);
     } else {
         if (g_header) fprintf(g_out, "file,line,function,steps\n");
         for (int i = 0; i < npaths; ++i) walk(paths[i], cb_analyze, NULL);
+        fprintf(stderr, "\r%-70s\r", "");   /* 進捗行をクリア */
     }
 
     if (outfile) fclose(g_out);

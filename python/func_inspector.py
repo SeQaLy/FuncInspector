@@ -95,10 +95,17 @@ def strip_comments_strings(src: str) -> str:
 # コンパイルスイッチの収集
 # --------------------------------------------------------------------------
 def collect_switches(src: str) -> dict:
-    """#if 系ディレクティブで参照されるマクロ名 -> 出現回数 を返す。"""
+    """#if 系ディレクティブで参照されるマクロ名 -> [出現回数, 初出行] を返す。"""
     clean = strip_comments_strings(src)
     counts = {}
-    for line in clean.split('\n'):
+
+    def add(name, lineno):
+        if name in counts:
+            counts[name][0] += 1
+        else:
+            counts[name] = [1, lineno]
+
+    for lineno, line in enumerate(clean.split('\n'), start=1):
         m = _DIRECTIVE.match(line)
         if not m:
             continue
@@ -106,13 +113,13 @@ def collect_switches(src: str) -> dict:
         if kind in ('ifdef', 'ifndef'):
             mm = _IDENT.search(rest)
             if mm:
-                counts[mm.group(0)] = counts.get(mm.group(0), 0) + 1
+                add(mm.group(0), lineno)
         elif kind in ('if', 'elif'):
             for mm in _IDENT.finditer(rest):
                 name = mm.group(0)
                 if name == 'defined':
                     continue
-                counts[name] = counts.get(name, 0) + 1
+                add(name, lineno)
     return counts
 
 
@@ -503,22 +510,55 @@ def analyze_file(path, defines=None):
     return [(path, line, name, steps) for (line, name, steps) in find_functions(src, defines)]
 
 
-def analyze_paths(paths, exts, defines=None):
+def analyze_paths(paths, exts, defines=None, progress=None):
+    files = gather_files(paths, exts)
+    total = len(files)
     rows = []
-    for fp in gather_files(paths, exts):
+    for idx, fp in enumerate(files, 1):
+        if progress:
+            progress(idx, total, fp)
         rows.extend(analyze_file(fp, defines))
     return rows
 
 
-def switches_in_paths(paths, exts):
-    counts = {}
-    for fp in gather_files(paths, exts):
+def switches_in_paths(paths, exts, progress=None):
+    """name -> {'count':, 'file':, 'line':}。file/line は最初の出現箇所。"""
+    files = gather_files(paths, exts)
+    total = len(files)
+    agg = {}
+    for idx, fp in enumerate(files, 1):
+        if progress:
+            progress(idx, total, fp)
         src = _read(fp)
         if src is None:
             continue
-        for name, c in collect_switches(src).items():
-            counts[name] = counts.get(name, 0) + c
-    return counts
+        for name, (c, ln) in collect_switches(src).items():
+            if name in agg:
+                agg[name]['count'] += c
+            else:
+                agg[name] = {'count': c, 'file': fp, 'line': ln}
+    return agg
+
+
+def open_location(path, line):
+    """ファイルの該当行をエディタで開く (VS Code 優先、無ければ OS 既定)。"""
+    import shutil
+    import subprocess
+    code = shutil.which('code') or shutil.which('code.cmd')
+    try:
+        if code:
+            subprocess.Popen([code, '-g', "%s:%d" % (path, line)])
+            return True
+        if sys.platform.startswith('win'):
+            os.startfile(path)  # noqa
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', path])
+        else:
+            subprocess.Popen(['xdg-open', path])
+        return True
+    except Exception as e:
+        sys.stderr.write("open failed: %s\n" % e)
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -526,17 +566,20 @@ def switches_in_paths(paths, exts):
 # --------------------------------------------------------------------------
 def run_gui():
     try:
+        import queue
+        import threading
         import tkinter as tk
         from tkinter import ttk, filedialog, messagebox
     except ImportError:
         sys.stderr.write("tkinter が無いため GUI を起動できません。CUI を使ってください。\n")
         return 1
 
-    state = {"rows": []}
+    state = {"rows": [], "sw_meta": {}}   # sw_meta: item_id -> (name, file, line)
+    q = queue.Queue()
 
     root = tk.Tk()
     root.title("FuncInspector - C 関数名抽出")
-    root.geometry("860x600")
+    root.geometry("900x620")
 
     top = ttk.Frame(root, padding=8)
     top.pack(fill="x")
@@ -568,26 +611,28 @@ def run_gui():
     mid = ttk.Frame(root, padding=8)
     mid.pack(fill="both", expand=True)
 
-    # 左: スイッチ一覧 (選択=ON)
+    # 左: スイッチ一覧 (選択=ON / ダブルクリックで該当箇所を開く)
     left = ttk.Frame(mid)
     left.pack(side="left", fill="y")
-    ttk.Label(left, text="コンパイルスイッチ (選択=ON)").pack(anchor="w")
-    sw_list = tk.Listbox(left, selectmode="extended", width=26, height=22, exportselection=False)
-    sw_list.pack(fill="y", expand=True)
+    ttk.Label(left, text="スイッチ (選択=ON / ダブルクリックで箇所を開く)").pack(anchor="w")
+    sw_cols = ("name", "cnt", "loc")
+    sw_tree = ttk.Treeview(left, columns=sw_cols, show="headings",
+                           selectmode="extended", height=20)
+    for c, t, w, a in (("name", "Switch", 130, "w"), ("cnt", "件", 40, "e"),
+                       ("loc", "初出 (file:line)", 160, "w")):
+        sw_tree.heading(c, text=t)
+        sw_tree.column(c, width=w, anchor=a)
+    sw_tree.pack(fill="y", expand=True)
 
-    def detect_switches():
-        p = path_var.get().strip()
-        if not p:
-            messagebox.showwarning("FuncInspector", "フォルダかファイルを指定してください。")
+    def open_selected_switch(_event=None):
+        sel = sw_tree.selection()
+        if not sel:
             return
-        exts = _parse_exts(ext_var.get())
-        counts = switches_in_paths([p], exts)
-        sw_list.delete(0, "end")
-        for name in sorted(counts):
-            sw_list.insert("end", "%s  (x%d)" % (name, counts[name]))
-        status.set("%d 個のスイッチを検出" % len(counts))
+        meta = state["sw_meta"].get(sel[0])
+        if meta:
+            open_location(meta[1], meta[2])
 
-    ttk.Button(left, text="スイッチ検出", command=detect_switches).pack(fill="x", pady=4)
+    sw_tree.bind("<Double-1>", open_selected_switch)
 
     # 右: 結果ツリー
     right = ttk.Frame(mid)
@@ -600,16 +645,113 @@ def run_gui():
         tree.column(c, width=w, anchor=a)
     tree.pack(fill="both", expand=True)
 
+    def open_selected_result(_event=None):
+        sel = tree.selection()
+        if not sel:
+            return
+        vals = tree.item(sel[0], "values")
+        if vals:
+            open_location(vals[0], int(vals[1]))
+
+    tree.bind("<Double-1>", open_selected_result)
+
+    # 進捗バー + ステータス
+    prog = ttk.Frame(root, padding=(8, 0))
+    prog.pack(fill="x")
+    pb = ttk.Progressbar(prog, mode="determinate", maximum=1, value=0)
+    pb.pack(side="left", fill="x", expand=True)
     status = tk.StringVar(value="準備完了")
     ttk.Label(root, textvariable=status, anchor="w").pack(fill="x", padx=8)
 
     def selected_defines():
         defs = {}
-        for idx in sw_list.curselection():
-            text = sw_list.get(idx)
-            name = text.split()[0]
-            defs[name] = '1'
+        for item in sw_tree.selection():
+            meta = state["sw_meta"].get(item)
+            if meta:
+                defs[meta[0]] = '1'
         return defs
+
+    # --- ボタン (先に作って busy 制御で参照) ---
+    btns = ttk.Frame(root, padding=8)
+    btns.pack(fill="x")
+    btn_scan = ttk.Button(btns, text="スキャン")
+    btn_detect = ttk.Button(left, text="スイッチ検出")
+    btn_save = ttk.Button(btns, text="CSV 保存")
+
+    def set_busy(b):
+        st = "disabled" if b else "normal"
+        for w in (btn_scan, btn_detect, btn_save):
+            w.config(state=st)
+
+    # --- ワーカ (別スレッド) ---
+    def worker_scan(p, exts, defines):
+        try:
+            rows = analyze_paths([p], exts, defines,
+                                 progress=lambda i, t, f: q.put(("progress", i, t, f)))
+            q.put(("scan_done", rows))
+        except Exception as e:  # noqa
+            q.put(("error", e))
+
+    def worker_detect(p, exts):
+        try:
+            agg = switches_in_paths([p], exts,
+                                    progress=lambda i, t, f: q.put(("progress", i, t, f)))
+            q.put(("switch_done", agg))
+        except Exception as e:  # noqa
+            q.put(("error", e))
+
+    def poll():
+        try:
+            while True:
+                msg = q.get_nowait()
+                tag = msg[0]
+                if tag == "progress":
+                    _, idx, total, fp = msg
+                    pb.config(maximum=max(1, total), value=idx)
+                    status.set("処理中... %d/%d  %s" % (idx, total, os.path.basename(fp)))
+                elif tag == "scan_done":
+                    rows = msg[1]
+                    state["rows"] = rows
+                    for it in tree.get_children():
+                        tree.delete(it)
+                    for (fp, line, name, steps) in rows:
+                        tree.insert("", "end", values=(fp, line, name, steps))
+                    total = sum(r[3] for r in rows)
+                    status.set("完了: %d 関数 / 合計 %d ステップ" % (len(rows), total))
+                    pb.config(value=0)
+                    set_busy(False)
+                elif tag == "switch_done":
+                    agg = msg[1]
+                    for it in sw_tree.get_children():
+                        sw_tree.delete(it)
+                    state["sw_meta"] = {}
+                    for name in sorted(agg):
+                        info = agg[name]
+                        loc = "%s:%d" % (os.path.basename(info["file"]), info["line"])
+                        iid = sw_tree.insert("", "end",
+                                             values=(name, info["count"], loc))
+                        state["sw_meta"][iid] = (name, info["file"], info["line"])
+                    status.set("完了: %d 個のスイッチを検出" % len(agg))
+                    pb.config(value=0)
+                    set_busy(False)
+                elif tag == "error":
+                    messagebox.showerror("FuncInspector", str(msg[1]))
+                    status.set("エラー")
+                    pb.config(value=0)
+                    set_busy(False)
+        except queue.Empty:
+            pass
+        root.after(80, poll)
+
+    def do_detect():
+        p = path_var.get().strip()
+        if not p:
+            messagebox.showwarning("FuncInspector", "フォルダかファイルを指定してください。")
+            return
+        exts = _parse_exts(ext_var.get())
+        set_busy(True)
+        status.set("スイッチ検出中...")
+        threading.Thread(target=worker_detect, args=(p, exts), daemon=True).start()
 
     def do_scan():
         p = path_var.get().strip()
@@ -618,14 +760,9 @@ def run_gui():
             return
         exts = _parse_exts(ext_var.get())
         defines = None if ignore_var.get() else selected_defines()
-        rows = analyze_paths([p], exts, defines)
-        state["rows"] = rows
-        for it in tree.get_children():
-            tree.delete(it)
-        for (fp, line, name, steps) in rows:
-            tree.insert("", "end", values=(fp, line, name, steps))
-        total = sum(r[3] for r in rows)
-        status.set("%d 関数 / 合計 %d ステップ" % (len(rows), total))
+        set_busy(True)
+        status.set("スキャン中...")
+        threading.Thread(target=worker_scan, args=(p, exts, defines), daemon=True).start()
 
     def do_save():
         if not state["rows"]:
@@ -643,12 +780,15 @@ def run_gui():
         except OSError as e:
             messagebox.showerror("FuncInspector", "保存に失敗: %s" % e)
 
-    btns = ttk.Frame(root, padding=8)
-    btns.pack(fill="x")
-    ttk.Button(btns, text="スキャン", command=do_scan).pack(side="left")
-    ttk.Button(btns, text="CSV 保存", command=do_save).pack(side="left", padx=6)
+    btn_detect.config(command=do_detect)
+    btn_scan.config(command=do_scan)
+    btn_save.config(command=do_save)
+    btn_detect.pack(fill="x", pady=4)
+    btn_scan.pack(side="left")
+    btn_save.pack(side="left", padx=6)
     ttk.Button(btns, text="終了", command=root.destroy).pack(side="right")
 
+    root.after(80, poll)
     root.mainloop()
     return 0
 
@@ -659,6 +799,17 @@ def run_gui():
 def _parse_exts(s):
     return [e if e.startswith('.') else '.' + e
             for e in (x.strip() for x in s.split(',')) if e]
+
+
+def _cli_progress(idx, total, fp):
+    """進捗を stderr に上書き表示 (stdout の CSV は汚さない)。"""
+    sys.stderr.write("\r処理中 %d/%d %-48.48s" % (idx, total, os.path.basename(fp)))
+    sys.stderr.flush()
+
+
+def _cli_progress_done():
+    sys.stderr.write("\r" + " " * 70 + "\r")
+    sys.stderr.flush()
 
 
 def _build_defines(define_args, undef_args):
@@ -700,21 +851,25 @@ def main(argv=None):
 
     # スイッチ一覧モード
     if args.list_switches:
-        counts = switches_in_paths(args.paths, exts)
+        agg = switches_in_paths(args.paths, exts, progress=_cli_progress)
+        _cli_progress_done()
         lines = []
         if args.header:
-            lines.append("switch,occurrences,state")
-        for name in sorted(counts):
+            lines.append("switch,occurrences,state,file,line")
+        for name in sorted(agg):
+            info = agg[name]
             state = "ON" if name in defines else "OFF"
-            lines.append("%s,%d,%s" % (name, counts[name], state))
+            lines.append("%s,%d,%s,%s,%d" % (name, info["count"], state,
+                                             info["file"], info["line"]))
         text = "\n".join(lines)
         _emit(text, args.out)
-        sys.stderr.write("%d 個のスイッチ\n" % len(counts))
+        sys.stderr.write("%d 個のスイッチ\n" % len(agg))
         return 0
 
     # 関数抽出モード
     use_defines = None if args.ignore_switches else defines
-    rows = analyze_paths(args.paths, exts, use_defines)
+    rows = analyze_paths(args.paths, exts, use_defines, progress=_cli_progress)
+    _cli_progress_done()
     lines = []
     if args.header:
         lines.append("file,line,function,steps")
