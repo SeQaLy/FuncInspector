@@ -106,21 +106,26 @@ def _tokval(t):
     return None
 
 
-def collect_switches(src: str) -> dict:
-    """#if 系ディレクティブで参照されるマクロ名 -> [出現回数, 初出行, 値候補set]。
-    値候補: `NAME == 1` なら '1'、`NAME == VAR` なら 'VAR'、
-    `#ifdef`/`defined(NAME)`/ブール使用は '1'。
+def _classify_switches(clean: str) -> dict:
+    """識別子 -> [count, firstline, set(values), switch_role, value_role]。
+    switch_role: ifdef/ifndef/defined/ブール、または比較で「試される側」。
+    value_role : 比較の「値の側」(例: TOOL_TEST == CFG_A の CFG_A)。
     """
-    clean = strip_comments_strings(src)
-    counts = {}
+    info = {}
 
-    def add(name, lineno, value=None):
-        if name in counts:
-            counts[name][0] += 1
-        else:
-            counts[name] = [1, lineno, set()]
+    def ensure(name, lineno):
+        e = info.get(name)
+        if e is None:
+            e = [0, lineno, set(), False, False]
+            info[name] = e
+        return e
+
+    def add_switch(name, lineno, value):
+        e = ensure(name, lineno)
+        e[0] += 1
+        e[3] = True
         if value is not None:
-            counts[name][2].add(value)
+            e[2].add(value)
 
     for lineno, line in enumerate(clean.split('\n'), start=1):
         m = _DIRECTIVE.match(line)
@@ -130,38 +135,50 @@ def collect_switches(src: str) -> dict:
         if kind in ('ifdef', 'ifndef'):
             mm = _IDENT.search(rest)
             if mm:
-                add(mm.group(0), lineno, '1')
+                add_switch(mm.group(0), lineno, '1')
         elif kind in ('if', 'elif'):
             toks = _tokenize_expr(rest)
-            compared = set()
-            # 比較式 NAME <op> 値 / 値 <op> NAME から値候補を集める
+            handled = set()  # 比較/defined で消費したトークン位置 (素のブール扱いを避ける)
             for i, t in enumerate(toks):
                 if t[0] == 'op' and t[1] in _CMP_OPS:
-                    left = toks[i - 1] if i - 1 >= 0 else None
-                    right = toks[i + 1] if i + 1 < len(toks) else None
-                    if left and left[0] == 'id' and left[1] != 'defined' and right:
-                        v = _tokval(right)
-                        if v is not None:
-                            add(left[1], lineno, v)
-                            compared.add(left[1])
-                    if right and right[0] == 'id' and right[1] != 'defined' and left:
-                        v = _tokval(left)
-                        if v is not None:
-                            add(right[1], lineno, v)
-                            compared.add(right[1])
-            # defined(NAME) -> '1'
+                    L = toks[i - 1] if i - 1 >= 0 else None
+                    R = toks[i + 1] if i + 1 < len(toks) else None
+                    Lid = bool(L) and L[0] == 'id' and L[1] != 'defined'
+                    Rid = bool(R) and R[0] == 'id' and R[1] != 'defined'
+                    if Lid and R and R[0] == 'num':
+                        add_switch(L[1], lineno, str(R[1])); handled.add(i - 1)
+                    elif Rid and L and L[0] == 'num':
+                        add_switch(R[1], lineno, str(L[1])); handled.add(i + 1)
+                    elif Lid and Rid:
+                        # 左 = 試される側(スイッチ) / 右 = 値の側
+                        add_switch(L[1], lineno, R[1]); handled.add(i - 1)
+                        ensure(R[1], lineno)[4] = True; handled.add(i + 1)
             for i, t in enumerate(toks):
                 if t[0] == 'id' and t[1] == 'defined':
                     for j in range(i + 1, min(i + 3, len(toks))):
                         if toks[j][0] == 'id':
-                            add(toks[j][1], lineno, '1')
-                            compared.add(toks[j][1])
+                            add_switch(toks[j][1], lineno, '1'); handled.add(j)
                             break
-            # それ以外の素の識別子使用 (#if FOO など) -> '1'
-            for t in toks:
-                if t[0] == 'id' and t[1] != 'defined' and t[1] not in compared:
-                    add(t[1], lineno, '1')
-    return counts
+            for i, t in enumerate(toks):  # 素の識別子 (#if FOO) -> ブール=スイッチ
+                if t[0] == 'id' and t[1] != 'defined' and i not in handled:
+                    add_switch(t[1], lineno, '1')
+    return info
+
+
+def _value_constants(info: dict) -> set:
+    """値の側でしか使われない識別子 (= 値定数。スイッチではない)。"""
+    return {n for n, e in info.items() if e[4] and not e[3]}
+
+
+def value_constants(clean: str) -> set:
+    return _value_constants(_classify_switches(clean))
+
+
+def collect_switches(src: str) -> dict:
+    """スイッチ名 -> [出現回数, 初出行, 値候補set]。値定数 (CFG_A 等) は除外。"""
+    info = _classify_switches(strip_comments_strings(src))
+    vconsts = _value_constants(info)
+    return {n: [e[0], e[1], e[2]] for n, e in info.items() if n not in vconsts}
 
 
 def _sort_values(values):
@@ -335,16 +352,19 @@ def _eval_expr(expr: str, defines: dict) -> int:
 # --------------------------------------------------------------------------
 # プリプロセス (条件コンパイル評価)
 # --------------------------------------------------------------------------
-def preprocess(clean: str, defines: dict, pinned=None, external=False) -> str:
+def preprocess(clean: str, defines: dict, pinned=None, external=False, value_consts=None) -> str:
     """条件コンパイルを評価し、無効ブロックとディレクティブ行を空行化する。
     行番号を保つため行数は変えない。defines は破壊的に更新され得る (呼び元でコピー)。
     pinned に入った名前は「-D/-U で固定」扱いで、ソース内の #define/#undef では
     上書きされない (コマンドライン優先)。
-    external=True のときは、ソース内の #define/#undef を一切反映しない
-    (スイッチは -D 選択のみで決まる = 「選択した時だけ有効」)。
+    external=True のときは、ソース内の #define/#undef を反映しない
+    (スイッチは -D 選択のみで決まる)。ただし value_consts (値定数) に入る名前の
+    #define は external でも尊重する (例: #define CFG_A 100)。
     """
     if pinned is None:
         pinned = set()
+    if value_consts is None:
+        value_consts = set()
     out = []
     stack = []  # 各フレーム: {'parent':bool, 'taken':bool, 'active':bool}
 
@@ -393,15 +413,16 @@ def preprocess(clean: str, defines: dict, pinned=None, external=False) -> str:
                 if stack:
                     stack.pop()
             elif kind == 'define':
-                if emitting() and not external:
+                if emitting():
                     mm = _IDENT.search(rest)
-                    if mm and mm.group(0) not in pinned:
+                    if mm and mm.group(0) not in pinned and (not external or mm.group(0) in value_consts):
                         after = rest[mm.end():].strip()
                         defines[mm.group(0)] = after if after else '1'
             elif kind == 'undef':
-                if emitting() and not external:
+                if emitting():
                     mm = _IDENT.search(rest)
-                    if mm and mm.group(0) not in pinned and mm.group(0) in defines:
+                    if (mm and mm.group(0) not in pinned and (not external or mm.group(0) in value_consts)
+                            and mm.group(0) in defines):
                         del defines[mm.group(0)]
             out.append('')  # ディレクティブ行自体は空行化
         else:
@@ -532,7 +553,8 @@ def find_functions(src, defines=None, pinned=None, external=False):
     """
     clean = strip_comments_strings(src)
     if defines is not None:
-        clean = preprocess(clean, dict(defines), pinned, external)
+        vconsts = value_constants(clean) if external else None
+        clean = preprocess(clean, dict(defines), pinned, external, vconsts)
     return _scan(clean)
 
 

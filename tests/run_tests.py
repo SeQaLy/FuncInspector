@@ -62,12 +62,23 @@ TESTS = [
          expect={"switches": {"CFG_A": (2, "OFF", "1"), "CFG_B": (1, "OFF", "1"), "VER": (1, "OFF", "2")}}),
 
     dict(id="switch-values", file="values.c", mode="switches", defines=[], ignore=False,
-         desc="値候補の抽出: ==1/==2 は 1;2、==variable は variable、ifdef/bool は 1",
+         desc="値候補の抽出: ==1/==2 は 1;2、==variable は variable、ifdef/bool は 1。variable は値定数なので一覧から除外",
          expect={"switches": {
              "LOCAL_LOG_ENABLE": (1, "OFF", "1"),
              "TOOL_TEST": (2, "OFF", "1;2"),
-             "MODE": (1, "OFF", "variable"),
-             "variable": (1, "OFF", "MODE")}}),
+             "MODE": (1, "OFF", "variable")}}),
+
+    dict(id="vc-list", file="valconst.c", mode="switches", defines=[], ignore=False,
+         desc="値定数: CFG_A(=100, 右辺値のみ)はスイッチ一覧から除外。TOOL_TEST の値候補に CFG_A は残る",
+         expect={"switches": {"TOOL_TEST": (3, "OFF", "1;2;CFG_A")}}),
+
+    dict(id="vc-ext-none", file="valconst.c", mode="scan", defines=[], ignore=False, external=True,
+         desc="選択スイッチのみ有効/未選択: CFG_A=100 を尊重し 0==100 偽 → t_cfg は出ない",
+         expect={"count": 1, "funcs": {"always": 1}, "absent": ["t1", "t2", "t_cfg"]}),
+
+    dict(id="vc-ext-1", file="valconst.c", mode="scan", defines=["TOOL_TEST=1"], ignore=False, external=True,
+         desc="選択スイッチのみ有効/TOOL_TEST=1: t1 のみ",
+         expect={"count": 2, "funcs": {"t1": 1, "always": 1}, "absent": ["t2", "t_cfg"]}),
 
     dict(id="pin-default", file="pinned.c", mode="scan", defines=[], ignore=False,
          desc="ピン留め既定: ソース内 #define TOOL_TEST 0 が効き test_only は隠れる",

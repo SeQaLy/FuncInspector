@@ -160,11 +160,11 @@ function Initialize-FiNative {
     $script:FiNativeTried = $true
     # 名前空間にバージョンを付与: C# のシグネチャを変えたら必ず番号を上げること。
     # こうすると、同一プロセスに残った旧版の型と衝突せず、更新後の型を必ずコンパイルできる。
-    try { $script:FiNativeType = [FuncInspectorNativeV4.Engine]; return $true } catch {}
+    try { $script:FiNativeType = [FuncInspectorNativeV5.Engine]; return $true } catch {}
     $code = @'
 using System;
 using System.Collections.Generic;
-namespace FuncInspectorNativeV4 {
+namespace FuncInspectorNativeV5 {
   public class Row { public string File; public int Line; public string Function; public int Steps; }
   public class Sw  { public string Name; public int Count; public int Line; public List<string> Vals = new List<string>(); }
   public static class Engine {
@@ -271,7 +271,7 @@ namespace FuncInspectorNativeV4 {
     static long EvalIf(char[] b,int s,int e,Dictionary<string,string> defs){
       var p=new Pr(Tokenize(b,s,e),defs); try { return p.Or()!=0?1:0; } catch { return 0; } }
 
-    public static string Preprocess(string clean,Dictionary<string,string> defs,HashSet<string> pinned,bool external){
+    public static string Preprocess(string clean,Dictionary<string,string> defs,HashSet<string> pinned,bool external,HashSet<string> valConsts){
       char[] b=clean.ToCharArray(); int n=b.Length;
       var par=new List<bool>(); var tak=new List<bool>(); var act=new List<bool>();
       int ls=0;
@@ -286,8 +286,8 @@ namespace FuncInspectorNativeV4 {
           else if(kind==4){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ bool cond=EvalIf(b,rest,le,defs)!=0; act[idx]=cond; if(cond)tak[idx]=true; } else act[idx]=false; } }
           else if(kind==5){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ act[idx]=true; tak[idx]=true; } else act[idx]=false; } }
           else if(kind==6){ int idx=act.Count-1; if(idx>=0){ par.RemoveAt(idx); tak.RemoveAt(idx); act.RemoveAt(idx); } }
-          else if(kind==7){ if(emit && !external){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null && !pinned.Contains(nm)){ int vs=after; while(vs<le && (b[vs]==' '||b[vs]=='\t')) vs++; int ve=le; while(ve>vs && (b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r')) ve--; string val= ve>vs? new string(b,vs,ve-vs) : "1"; defs[nm]=val; } } }
-          else if(kind==8){ if(emit && !external){ string nm=FirstIdent(b,rest,le); if(nm!=null && !pinned.Contains(nm) && defs.ContainsKey(nm)) defs.Remove(nm); } }
+          else if(kind==7){ if(emit){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null && !pinned.Contains(nm) && (!external || valConsts.Contains(nm))){ int vs=after; while(vs<le && (b[vs]==' '||b[vs]=='\t')) vs++; int ve=le; while(ve>vs && (b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r')) ve--; string val= ve>vs? new string(b,vs,ve-vs) : "1"; defs[nm]=val; } } }
+          else if(kind==8){ if(emit){ string nm=FirstIdent(b,rest,le); if(nm!=null && !pinned.Contains(nm) && (!external || valConsts.Contains(nm)) && defs.ContainsKey(nm)) defs.Remove(nm); } }
         } else { if(!emit) blank=true; }
         if(blank){ for(int p=ls;p<le;p++) b[p]=' '; }
         if(le>=n) break; ls=le+1;
@@ -329,39 +329,48 @@ namespace FuncInspectorNativeV4 {
 
     public static List<Row> Analyze(string path,string src,Dictionary<string,string> defs,bool ignore,HashSet<string> pinned,bool external){
       string clean=Strip(src);
-      if(!ignore){ var d=new Dictionary<string,string>(defs); clean=Preprocess(clean,d,pinned,external); }
+      if(!ignore){ var d=new Dictionary<string,string>(defs); HashSet<string> vc = external ? ValueConsts(ClassifyClean(clean)) : new HashSet<string>(); clean=Preprocess(clean,d,pinned,external,vc); }
       return Scan(path,clean);
     }
-    static Sw GetOrAdd(Dictionary<string,Sw> map,string name,int line){ Sw s; if(!map.TryGetValue(name,out s)){ s=new Sw{Name=name,Count=0,Line=line}; map[name]=s; } s.Count++; return s; }
-    static void AddVal(Sw s,string v){ if(string.IsNullOrEmpty(v)) return; if(!s.Vals.Contains(v)) s.Vals.Add(v); }
-    static string TokVal(Tok t){ if(t.Kind==0) return t.Num.ToString(); if(t.Kind==1 && t.Id!="defined") return t.Id; return null; }
+    class SwInfo { public int Count; public int Line; public List<string> Vals=new List<string>(); public bool SwRole; public bool ValRole; }
+    static void AddVal2(SwInfo s,string v){ if(string.IsNullOrEmpty(v)) return; if(!s.Vals.Contains(v)) s.Vals.Add(v); }
+    static SwInfo Ensure(Dictionary<string,SwInfo> map,string name,int line){ SwInfo s; if(!map.TryGetValue(name,out s)){ s=new SwInfo{Count=0,Line=line}; map[name]=s; } return s; }
+    static bool TokIsId(Tok t){ return t!=null && t.Kind==1 && t.Id!="defined"; }
     static bool IsCmp(Tok t){ return t.Kind==2 && (t.Id=="=="||t.Id=="!="||t.Id=="<"||t.Id==">"||t.Id=="<="||t.Id==">="); }
-    public static List<Sw> CollectSwitches(string src){
-      string clean=Strip(src); char[] b=clean.ToCharArray(); int n=b.Length;
-      var map=new Dictionary<string,Sw>(); int ls=0; int lineno=0;
+    static Dictionary<string,SwInfo> ClassifyClean(string clean){
+      char[] b=clean.ToCharArray(); int n=b.Length;
+      var map=new Dictionary<string,SwInfo>(); int ls=0; int lineno=0;
       while(ls<=n){ lineno++; int le=ls; while(le<n && b[le]!='\n') le++;
         int rest; int kind=ParseDirective(b,ls,le,out rest);
-        if(kind==1||kind==2){ string nm=FirstIdent(b,rest,le); if(nm!=null) AddVal(GetOrAdd(map,nm,lineno),"1"); }
+        if(kind==1||kind==2){ string nm=FirstIdent(b,rest,le); if(nm!=null){ var s=Ensure(map,nm,lineno); s.Count++; s.SwRole=true; AddVal2(s,"1"); } }
         else if(kind==3||kind==4){
-          var toks=Tokenize(b,rest,le); var compared=new HashSet<string>();
-          for(int i=0;i<toks.Count;i++){ if(IsCmp(toks[i])){
+          var toks=Tokenize(b,rest,le); var handled=new HashSet<int>();
+          for(int i=0;i<toks.Count;i++){ if(!IsCmp(toks[i])) continue;
             Tok L=i-1>=0?toks[i-1]:null; Tok R=i+1<toks.Count?toks[i+1]:null;
-            if(L!=null && L.Kind==1 && L.Id!="defined" && R!=null){ string v=TokVal(R); if(v!=null){ AddVal(GetOrAdd(map,L.Id,lineno),v); compared.Add(L.Id); } }
-            if(R!=null && R.Kind==1 && R.Id!="defined" && L!=null){ string v=TokVal(L); if(v!=null){ AddVal(GetOrAdd(map,R.Id,lineno),v); compared.Add(R.Id); } }
-          } }
-          for(int i=0;i<toks.Count;i++){ if(toks[i].Kind==1 && toks[i].Id=="defined"){ for(int j=i+1;j<toks.Count && j<i+3;j++){ if(toks[j].Kind==1){ AddVal(GetOrAdd(map,toks[j].Id,lineno),"1"); compared.Add(toks[j].Id); break; } } } }
-          for(int i=0;i<toks.Count;i++){ if(toks[i].Kind==1 && toks[i].Id!="defined" && !compared.Contains(toks[i].Id)){ AddVal(GetOrAdd(map,toks[i].Id,lineno),"1"); } }
+            bool Lid=TokIsId(L), Rid=TokIsId(R);
+            if(Lid && R!=null && R.Kind==0){ var s=Ensure(map,L.Id,lineno); s.Count++; s.SwRole=true; AddVal2(s,R.Num.ToString()); handled.Add(i-1); }
+            else if(Rid && L!=null && L.Kind==0){ var s=Ensure(map,R.Id,lineno); s.Count++; s.SwRole=true; AddVal2(s,L.Num.ToString()); handled.Add(i+1); }
+            else if(Lid && Rid){ var s=Ensure(map,L.Id,lineno); s.Count++; s.SwRole=true; AddVal2(s,R.Id); Ensure(map,R.Id,lineno).ValRole=true; handled.Add(i-1); handled.Add(i+1); }
+          }
+          for(int i=0;i<toks.Count;i++){ if(toks[i].Kind==1 && toks[i].Id=="defined"){ for(int j=i+1;j<toks.Count && j<i+3;j++){ if(toks[j].Kind==1){ var s=Ensure(map,toks[j].Id,lineno); s.Count++; s.SwRole=true; AddVal2(s,"1"); handled.Add(j); break; } } } }
+          for(int i=0;i<toks.Count;i++){ if(toks[i].Kind==1 && toks[i].Id!="defined" && !handled.Contains(i)){ var s=Ensure(map,toks[i].Id,lineno); s.Count++; s.SwRole=true; AddVal2(s,"1"); } }
         }
         if(le>=n) break; ls=le+1;
       }
-      return new List<Sw>(map.Values);
+      return map;
+    }
+    static HashSet<string> ValueConsts(Dictionary<string,SwInfo> map){ var h=new HashSet<string>(); foreach(var kv in map) if(kv.Value.ValRole && !kv.Value.SwRole) h.Add(kv.Key); return h; }
+    public static List<Sw> CollectSwitches(string src){
+      var map=ClassifyClean(Strip(src)); var vc=ValueConsts(map); var list=new List<Sw>();
+      foreach(var kv in map){ if(vc.Contains(kv.Key)) continue; var s=new Sw{Name=kv.Key,Count=kv.Value.Count,Line=kv.Value.Line}; s.Vals.AddRange(kv.Value.Vals); list.Add(s); }
+      return list;
     }
   }
 }
 '@
     try {
         Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-        $script:FiNativeType = [FuncInspectorNativeV4.Engine]
+        $script:FiNativeType = [FuncInspectorNativeV5.Engine]
         return $true
     }
     catch { Write-Verbose "FiNative コンパイル失敗 (純PSにフォールバック): $_"; return $false }
@@ -459,7 +468,7 @@ function Test-FiEmitting {
 }
 
 function Invoke-FiPreprocess {
-    param([string]$Clean, [hashtable]$Defines, [hashtable]$Pinned = @{}, [switch]$External)
+    param([string]$Clean, [hashtable]$Defines, [hashtable]$Pinned = @{}, [switch]$External, [hashtable]$ValConsts = @{})
     $out = New-Object System.Collections.Generic.List[string]
     $stack = New-Object System.Collections.Generic.List[object]
     foreach ($line in ($Clean -split "`n")) {
@@ -503,9 +512,9 @@ function Invoke-FiPreprocess {
                 }
                 'endif' { if ($stack.Count) { $stack.RemoveAt($stack.Count - 1) } }
                 'define' {
-                    if ((Test-FiEmitting $stack) -and -not $External) {
+                    if (Test-FiEmitting $stack) {
                         $idm = $script:FiRxId.Match($rest)
-                        if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value)) {
+                        if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value) -and (-not $External -or $ValConsts.ContainsKey($idm.Value))) {
                             $after = $rest.Substring($idm.Index + $idm.Length).Trim()
                             if ($after -eq '') { $after = '1' }
                             $Defines[$idm.Value] = $after
@@ -513,9 +522,9 @@ function Invoke-FiPreprocess {
                     }
                 }
                 'undef' {
-                    if ((Test-FiEmitting $stack) -and -not $External) {
+                    if (Test-FiEmitting $stack) {
                         $idm = $script:FiRxId.Match($rest)
-                        if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value) -and $Defines.ContainsKey($idm.Value)) { $Defines.Remove($idm.Value) }
+                        if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value) -and (-not $External -or $ValConsts.ContainsKey($idm.Value)) -and $Defines.ContainsKey($idm.Value)) { $Defines.Remove($idm.Value) }
                     }
                 }
             }
@@ -539,6 +548,61 @@ function Get-FiSortedValues($values) {
     return ((@($nums) + @($ids)) -join ';')
 }
 
+# 役割付きでスイッチを分類 (純PSフォールバック用)。name -> @{Count;Line;Values;SwRole;ValRole}
+function Get-FiClassify([string]$Clean) {
+    $info = @{}
+    $cmps = @('==', '!=', '<', '>', '<=', '>=')
+    $ens = {
+        param($name, $ln)
+        if (-not $info.ContainsKey($name)) { $info[$name] = @{ Count = 0; Line = $ln; Values = (New-Object System.Collections.Generic.List[string]); SwRole = $false; ValRole = $false } }
+        $info[$name]
+    }
+    $addv = { param($e, $v) if ($null -ne $v -and -not $e.Values.Contains([string]$v)) { $e.Values.Add([string]$v) } }
+    $ln = 0
+    foreach ($line in ($Clean -split "`n")) {
+        $ln++
+        $m = $script:FiRxDir.Match($line); if (-not $m.Success) { continue }
+        $kind = $m.Groups[1].Value; $rest = $m.Groups[2].Value
+        if ($kind -eq 'ifdef' -or $kind -eq 'ifndef') {
+            $idm = $script:FiRxId.Match($rest)
+            if ($idm.Success) { $e = & $ens $idm.Value $ln; $e.Count++; $e.SwRole = $true; & $addv $e '1' }
+        }
+        elseif ($kind -eq 'if' -or $kind -eq 'elif') {
+            $toks = ConvertTo-FiTokens $rest
+            $handled = @{}
+            for ($i = 0; $i -lt $toks.Count; $i++) {
+                $t = $toks[$i]
+                if ($t.K -eq 'op' -and $cmps -contains $t.V) {
+                    $L = if ($i - 1 -ge 0) { $toks[$i - 1] } else { $null }
+                    $R = if ($i + 1 -lt $toks.Count) { $toks[$i + 1] } else { $null }
+                    $Lid = $L -and $L.K -eq 'id' -and $L.V -ne 'defined'
+                    $Rid = $R -and $R.K -eq 'id' -and $R.V -ne 'defined'
+                    if ($Lid -and $R -and $R.K -eq 'num') { $e = & $ens $L.V $ln; $e.Count++; $e.SwRole = $true; & $addv $e ([string]$R.V); $handled[$i - 1] = $true }
+                    elseif ($Rid -and $L -and $L.K -eq 'num') { $e = & $ens $R.V $ln; $e.Count++; $e.SwRole = $true; & $addv $e ([string]$L.V); $handled[$i + 1] = $true }
+                    elseif ($Lid -and $Rid) { $e = & $ens $L.V $ln; $e.Count++; $e.SwRole = $true; & $addv $e ([string]$R.V); (& $ens $R.V $ln).ValRole = $true; $handled[$i - 1] = $true; $handled[$i + 1] = $true }
+                }
+            }
+            for ($i = 0; $i -lt $toks.Count; $i++) {
+                if ($toks[$i].K -eq 'id' -and $toks[$i].V -eq 'defined') {
+                    for ($j = $i + 1; $j -lt $toks.Count -and $j -lt $i + 3; $j++) {
+                        if ($toks[$j].K -eq 'id') { $e = & $ens $toks[$j].V $ln; $e.Count++; $e.SwRole = $true; & $addv $e '1'; $handled[$j] = $true; break }
+                    }
+                }
+            }
+            for ($i = 0; $i -lt $toks.Count; $i++) {
+                if ($toks[$i].K -eq 'id' -and $toks[$i].V -ne 'defined' -and -not $handled.ContainsKey($i)) { $e = & $ens $toks[$i].V $ln; $e.Count++; $e.SwRole = $true; & $addv $e '1' }
+            }
+        }
+    }
+    return $info
+}
+function Get-FiValueConsts([string]$Clean) {
+    $vc = @{}
+    $info = Get-FiClassify $Clean
+    foreach ($k in $info.Keys) { if ($info[$k].ValRole -and -not $info[$k].SwRole) { $vc[$k] = $true } }
+    return $vc
+}
+
 function Get-FiFileSwitches {
     <# 1ファイルのスイッチ名 -> @{Count;Line(初出);Values(List)} を返す。 #>
     param([string]$FilePath)
@@ -553,47 +617,11 @@ function Get-FiFileSwitches {
         return $res
     }
     # --- 純 PowerShell フォールバック ---
-    $clean = Remove-FICommentsStrings $src
-    $cmps = @('==', '!=', '<', '>', '<=', '>=')
-    $addsw = {
-        param($name, $ln, $val)
-        if (-not $res.ContainsKey($name)) { $res[$name] = @{ Count = 0; Line = $ln; Values = (New-Object System.Collections.Generic.List[string]) } }
-        $res[$name].Count++
-        if ($null -ne $val -and -not $res[$name].Values.Contains($val)) { $res[$name].Values.Add($val) }
-    }
-    $ln = 0
-    foreach ($line in ($clean -split "`n")) {
-        $ln++
-        $m = $script:FiRxDir.Match($line)
-        if (-not $m.Success) { continue }
-        $kind = $m.Groups[1].Value; $rest = $m.Groups[2].Value
-        if ($kind -eq 'ifdef' -or $kind -eq 'ifndef') {
-            $idm = $script:FiRxId.Match($rest)
-            if ($idm.Success) { & $addsw $idm.Value $ln '1' }
-        }
-        elseif ($kind -eq 'if' -or $kind -eq 'elif') {
-            $toks = ConvertTo-FiTokens $rest
-            $compared = @{}
-            for ($i = 0; $i -lt $toks.Count; $i++) {
-                $t = $toks[$i]
-                if ($t.K -eq 'op' -and $cmps -contains $t.V) {
-                    $L = if ($i - 1 -ge 0) { $toks[$i - 1] } else { $null }
-                    $R = if ($i + 1 -lt $toks.Count) { $toks[$i + 1] } else { $null }
-                    if ($L -and $L.K -eq 'id' -and $L.V -ne 'defined' -and $R) { $v = Get-FiTokVal $R; if ($null -ne $v) { & $addsw $L.V $ln $v; $compared[$L.V] = $true } }
-                    if ($R -and $R.K -eq 'id' -and $R.V -ne 'defined' -and $L) { $v = Get-FiTokVal $L; if ($null -ne $v) { & $addsw $R.V $ln $v; $compared[$R.V] = $true } }
-                }
-            }
-            for ($i = 0; $i -lt $toks.Count; $i++) {
-                if ($toks[$i].K -eq 'id' -and $toks[$i].V -eq 'defined') {
-                    for ($j = $i + 1; $j -lt $toks.Count -and $j -lt $i + 3; $j++) {
-                        if ($toks[$j].K -eq 'id') { & $addsw $toks[$j].V $ln '1'; $compared[$toks[$j].V] = $true; break }
-                    }
-                }
-            }
-            foreach ($t in $toks) {
-                if ($t.K -eq 'id' -and $t.V -ne 'defined' -and -not $compared.ContainsKey($t.V)) { & $addsw $t.V $ln '1' }
-            }
-        }
+    $info = Get-FiClassify (Remove-FICommentsStrings $src)
+    foreach ($k in $info.Keys) {
+        $e = $info[$k]
+        if ($e.ValRole -and -not $e.SwRole) { continue }   # 値定数は除外
+        $res[$k] = @{ Count = $e.Count; Line = $e.Line; Values = $e.Values }
     }
     return $res
 }
@@ -731,7 +759,8 @@ function Find-CFunctions {
         $d = if ($Defines) { $Defines.Clone() } else { @{} }
         $pin = @{}
         foreach ($p in ($Pinned | Where-Object { $_ })) { $pin[[string]$p] = $true }
-        $clean = Invoke-FiPreprocess $clean $d $pin -External:$External
+        $vc = if ($External) { Get-FiValueConsts $clean } else { @{} }
+        $clean = Invoke-FiPreprocess $clean $d $pin -External:$External -ValConsts $vc
     }
     return Get-FiScan $FilePath $clean
 }

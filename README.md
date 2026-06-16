@@ -30,8 +30,14 @@ switch,occurrences,state,filepath,line
 - `state` … 現在 ON か OFF か (`-D`/`-U` の指定を反映)
 - `filepath,line` … **最初に登場する箇所** (誤検知かどうかをここで確認できる)
 - `values` … そのスイッチが `#if`/`#elif` で比較されている**値候補** (`;` 区切り)。
-  例: `TOOL_TEST==1` / `#elif TOOL_TEST==2` → `1;2`、`MODE==variable` のように
-  右辺が識別子なら `variable`、`#ifdef`/ブール使用は `1`。GUI ではこれがプルダウンの選択肢。
+  例: `TOOL_TEST==1` / `#elif TOOL_TEST==2` → `1;2`、`#ifdef`/ブール使用は `1`。
+  GUI ではこれがプルダウンの選択肢。
+- **値定数の区別**: `#elif TOOL_TEST == CFG_A` のように、比較の**右辺(値)としてだけ**
+  使われる識別子 (例 `#define CFG_A 100`) は「値定数」とみなし、**スイッチ一覧から除外**します
+  (TOOL_TEST の値候補としては `CFG_A` が残ります)。さらに `--external-switches`
+  (選択スイッチのみ有効) でも**値定数の `#define` は尊重**するので、未選択時に
+  `TOOL_TEST(0) == CFG_A(0)` で `0==0` が成立して関数が誤って出てしまう、という事故を防ぎます
+  (`CFG_A=100` を尊重 → `0==100` で偽)。
 
 ## 特徴
 

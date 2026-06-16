@@ -365,7 +365,7 @@ static int eval_if(const char *buf, size_t s, size_t e, const Defs *d) {
 
 /* ---- プリプロセス (条件コンパイル) : 無効/ディレクティブ行を空白化 ------ */
 #define MAX_PP_DEPTH 256
-static void preprocess(char *buf, size_t n, Defs *d) {
+static void preprocess(char *buf, size_t n, Defs *d, Defs *vc) {
     int par[MAX_PP_DEPTH], tak[MAX_PP_DEPTH], act[MAX_PP_DEPTH];
     int sp = 0;
     size_t ls = 0;
@@ -411,8 +411,9 @@ static void preprocess(char *buf, size_t n, Defs *d) {
                     break; }
                 case D_ENDIF: { if (sp > 0) sp--; break; }
                 case D_DEFINE: {
-                    if (emit && !g_external && first_ident(buf, rest, le, nm, sizeof(nm), &after)
-                        && !defs_has(&g_pinned, nm)) {
+                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)
+                        && !defs_has(&g_pinned, nm)
+                        && (!g_external || (vc && defs_has(vc, nm)))) {
                         size_t vs = after; while (vs < le && (buf[vs]==' '||buf[vs]=='\t')) vs++;
                         size_t ve = le; while (ve > vs && (buf[ve-1]==' '||buf[ve-1]=='\t'||buf[ve-1]=='\r')) ve--;
                         char val[256]; size_t vlen = ve - vs; if (vlen >= sizeof(val)) vlen = sizeof(val)-1;
@@ -421,8 +422,9 @@ static void preprocess(char *buf, size_t n, Defs *d) {
                     }
                     break; }
                 case D_UNDEF: {
-                    if (emit && !g_external && first_ident(buf, rest, le, nm, sizeof(nm), &after)
-                        && !defs_has(&g_pinned, nm)) defs_remove(d, nm);
+                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)
+                        && !defs_has(&g_pinned, nm)
+                        && (!g_external || (vc && defs_has(vc, nm)))) defs_remove(d, nm);
                     break; }
             }
         } else {
@@ -533,6 +535,7 @@ static void scan_functions(const char *path, const char *buf, size_t n) {
 typedef struct {
     char name[128]; int count; char file[1024]; long line;
     char vals[SW_MAXVALS][40]; int nvals;
+    int sw_role, val_role;   /* スイッチ役割 / 値の側 役割 */
 } SwEntry;
 typedef struct { SwEntry *items; int count, cap; } SwSet;
 static void sw_init(SwSet *s) { s->items = NULL; s->count = 0; s->cap = 0; }
@@ -548,7 +551,7 @@ static int sw_find_or_add(SwSet *s, const char *name, const char *file, long lin
     SwEntry *e = &s->items[s->count];
     strncpy(e->name, name, 127); e->name[127] = '\0';
     strncpy(e->file, file, sizeof(e->file) - 1); e->file[sizeof(e->file) - 1] = '\0';
-    e->line = line; e->count = 1; e->nvals = 0;
+    e->line = line; e->count = 1; e->nvals = 0; e->sw_role = 0; e->val_role = 0;
     return s->count++;
 }
 static void sw_add_value(SwSet *s, int idx, const char *val) {
@@ -601,7 +604,10 @@ static int is_cmp_op(const Tok *t) {
         !strcmp(t->id, "<") || !strcmp(t->id, ">") || !strcmp(t->id, "<=") || !strcmp(t->id, ">="));
 }
 
-static void collect_switches(const char *buf, size_t n, SwSet *sw, const char *path) {
+static int tok_is_id(const Tok *t) { return t && t->kind == 1 && strcmp(t->id, "defined") != 0; }
+
+/* 役割付きでスイッチを分類 (sw_role/val_role を設定し、値候補を集める) */
+static void classify_switches(const char *buf, size_t n, SwSet *sw, const char *path) {
     size_t ls = 0; long lineno = 0;
     while (ls <= n) {
         lineno++;
@@ -609,51 +615,71 @@ static void collect_switches(const char *buf, size_t n, SwSet *sw, const char *p
         size_t rest; int kind = parse_directive(buf, ls, le, &rest);
         if (kind == D_IFDEF || kind == D_IFNDEF) {
             char nm[64]; size_t after;
-            if (first_ident(buf, rest, le, nm, sizeof(nm), &after))
-                sw_add_value(sw, sw_find_or_add(sw, nm, path, lineno), "1");
+            if (first_ident(buf, rest, le, nm, sizeof(nm), &after)) {
+                int idx = sw_find_or_add(sw, nm, path, lineno);
+                sw->items[idx].sw_role = 1; sw_add_value(sw, idx, "1");
+            }
         } else if (kind == D_IF || kind == D_ELIF) {
             Tok toks[256];
             int nt = tokenize_expr(buf, rest, le, toks, 256);
             char vb[40];
-            /* どの名前が比較に使われたか (素のブール扱いを避ける) */
-            char compared[64][128]; int ncmp = 0;
+            int handled[256]; for (int i = 0; i < nt; ++i) handled[i] = 0;
             for (int i = 0; i < nt; ++i) {
-                if (is_cmp_op(&toks[i])) {
-                    Tok *L = (i - 1 >= 0) ? &toks[i - 1] : NULL;
-                    Tok *R = (i + 1 < nt) ? &toks[i + 1] : NULL;
-                    if (L && L->kind == 1 && strcmp(L->id, "defined") != 0 && R) {
-                        const char *v = tokval(R, vb, sizeof(vb));
-                        if (v) { sw_add_value(sw, sw_find_or_add(sw, L->id, path, lineno), v);
-                                 if (ncmp < 64) { strncpy(compared[ncmp], L->id, 127); compared[ncmp++][127] = '\0'; } }
-                    }
-                    if (R && R->kind == 1 && strcmp(R->id, "defined") != 0 && L) {
-                        const char *v = tokval(L, vb, sizeof(vb));
-                        if (v) { sw_add_value(sw, sw_find_or_add(sw, R->id, path, lineno), v);
-                                 if (ncmp < 64) { strncpy(compared[ncmp], R->id, 127); compared[ncmp++][127] = '\0'; } }
-                    }
+                if (!is_cmp_op(&toks[i])) continue;
+                Tok *L = (i - 1 >= 0) ? &toks[i - 1] : NULL;
+                Tok *R = (i + 1 < nt) ? &toks[i + 1] : NULL;
+                int Lid = tok_is_id(L), Rid = tok_is_id(R);
+                if (Lid && R && R->kind == 0) {              /* id == num */
+                    int idx = sw_find_or_add(sw, L->id, path, lineno);
+                    sw->items[idx].sw_role = 1; sw_add_value(sw, idx, tokval(R, vb, sizeof(vb)));
+                    handled[i - 1] = 1;
+                } else if (Rid && L && L->kind == 0) {       /* num == id */
+                    int idx = sw_find_or_add(sw, R->id, path, lineno);
+                    sw->items[idx].sw_role = 1; sw_add_value(sw, idx, tokval(L, vb, sizeof(vb)));
+                    handled[i + 1] = 1;
+                } else if (Lid && Rid) {                      /* id == id: 左=スイッチ 右=値 */
+                    int idx = sw_find_or_add(sw, L->id, path, lineno);
+                    sw->items[idx].sw_role = 1; sw_add_value(sw, idx, R->id);
+                    int vidx = sw_find_or_add(sw, R->id, path, lineno);
+                    sw->items[vidx].val_role = 1;
+                    handled[i - 1] = 1; handled[i + 1] = 1;
                 }
             }
             for (int i = 0; i < nt; ++i) {  /* defined(NAME) -> 1 */
                 if (toks[i].kind == 1 && strcmp(toks[i].id, "defined") == 0) {
                     for (int j = i + 1; j < nt && j < i + 3; ++j)
                         if (toks[j].kind == 1) {
-                            sw_add_value(sw, sw_find_or_add(sw, toks[j].id, path, lineno), "1");
-                            if (ncmp < 64) { strncpy(compared[ncmp], toks[j].id, 127); compared[ncmp++][127] = '\0'; }
-                            break;
+                            int idx = sw_find_or_add(sw, toks[j].id, path, lineno);
+                            sw->items[idx].sw_role = 1; sw_add_value(sw, idx, "1");
+                            handled[j] = 1; break;
                         }
                 }
             }
             for (int i = 0; i < nt; ++i) {  /* 素の識別子使用 (#if FOO) -> 1 */
-                if (toks[i].kind == 1 && strcmp(toks[i].id, "defined") != 0) {
-                    int seen = 0;
-                    for (int c = 0; c < ncmp; ++c) if (strcmp(compared[c], toks[i].id) == 0) { seen = 1; break; }
-                    if (!seen) sw_add_value(sw, sw_find_or_add(sw, toks[i].id, path, lineno), "1");
+                if (toks[i].kind == 1 && strcmp(toks[i].id, "defined") != 0 && !handled[i]) {
+                    int idx = sw_find_or_add(sw, toks[i].id, path, lineno);
+                    sw->items[idx].sw_role = 1; sw_add_value(sw, idx, "1");
                 }
             }
         }
         if (le >= n) break;
         ls = le + 1;
     }
+}
+
+/* 一覧用: 値定数 (val_role かつ !sw_role) を除外したスイッチ集合を作る */
+static void collect_switches(const char *buf, size_t n, SwSet *sw, const char *path) {
+    classify_switches(buf, n, sw, path);
+}
+
+/* external 時に #define を尊重すべき値定数名を vc(名前集合) に集める */
+static void collect_value_constants(const char *buf, size_t n, Defs *vc) {
+    SwSet tmp; sw_init(&tmp);
+    classify_switches(buf, n, &tmp, "");
+    for (int i = 0; i < tmp.count; ++i)
+        if (tmp.items[i].val_role && !tmp.items[i].sw_role)
+            defs_set(vc, tmp.items[i].name, "");
+    sw_free(&tmp);
 }
 
 /* ---- ファイル処理 -------------------------------------------------------- */
@@ -674,7 +700,10 @@ static void analyze_file(const char *path) {
     strip_comments_strings(buf, n);
     if (!g_ignore_switches) {
         Defs d; defs_clone(&g_defines, &d);
-        preprocess(buf, n, &d);
+        Defs vc; defs_init(&vc);
+        if (g_external) collect_value_constants(buf, n, &vc);  /* 値定数の #define は尊重 */
+        preprocess(buf, n, &d, &vc);
+        defs_free(&vc);
         defs_free(&d);
     }
     scan_functions(path, buf, n);
@@ -829,6 +858,7 @@ int main(int argc, char **argv) {
         qsort(sw.items, sw.count, sizeof(SwEntry), sw_cmp);
         if (g_header) fprintf(g_out, "switch,occurrences,state,filepath,line,values\n");
         for (int i = 0; i < sw.count; ++i) {
+            if (sw.items[i].val_role && !sw.items[i].sw_role) continue;  /* 値定数は除外 */
             char vals[512]; sw_values_string(&sw.items[i], vals, sizeof(vals));
             fprintf(g_out, "%s,%d,%s,%s,%ld,%s\n", sw.items[i].name, sw.items[i].count,
                     defs_has(&g_defines, sw.items[i].name) ? "ON" : "OFF",

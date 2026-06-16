@@ -2,7 +2,7 @@
 
 `python tests/run_tests.py` で再実行できます。各テストは **期待値(アンカー)** と **3実装の相互一致** の両方を検証します。
 
-- 実行日時: 2026-06-17 00:57:24
+- 実行日時: 2026-06-17 01:28:32
 - 検証した実装: Python, C, PowerShell
 - C: gcc でビルドして検証
 - PowerShell: `pwsh.EXE` で検証
@@ -18,7 +18,10 @@
 | `switch-VER2` | -D VER=2: #if VER>=2 を式評価で真 | PASS | PASS | PASS | ✅ |
 | `switch-CFG_B` | -D CFG_B: #elif defined(CFG_B) を真 | PASS | PASS | PASS | ✅ |
 | `switch-list` | スイッチ一覧: 出現回数・状態・値候補 | PASS | PASS | PASS | ✅ |
-| `switch-values` | 値候補の抽出: ==1/==2 は 1;2、==variable は variable、ifdef/bool は 1 | PASS | PASS | PASS | ✅ |
+| `switch-values` | 値候補の抽出: ==1/==2 は 1;2、==variable は variable、ifdef/bool は 1。variable は値定数なので一覧から除外 | PASS | PASS | PASS | ✅ |
+| `vc-list` | 値定数: CFG_A(=100, 右辺値のみ)はスイッチ一覧から除外。TOOL_TEST の値候補に CFG_A は残る | PASS | PASS | PASS | ✅ |
+| `vc-ext-none` | 選択スイッチのみ有効/未選択: CFG_A=100 を尊重し 0==100 偽 → t_cfg は出ない | PASS | PASS | PASS | ✅ |
+| `vc-ext-1` | 選択スイッチのみ有効/TOOL_TEST=1: t1 のみ | PASS | PASS | PASS | ✅ |
 | `pin-default` | ピン留め既定: ソース内 #define TOOL_TEST 0 が効き test_only は隠れる | PASS | PASS | PASS | ✅ |
 | `pin-on` | -D TOOL_TEST=1 をピン留め優先: 内蔵 #define TOOL_TEST 0 を無視し test_only を検出 | PASS | PASS | PASS | ✅ |
 | `ext-off` | 既定(cpp準拠): 内蔵 #define TOOL_TEST 1 が効き t1 が出る | PASS | PASS | PASS | ✅ |
@@ -84,10 +87,36 @@
 
 ### switch-values — values.c
 
-- 説明: 値候補の抽出: ==1/==2 は 1;2、==variable は variable、ifdef/bool は 1
+- 説明: 値候補の抽出: ==1/==2 は 1;2、==variable は variable、ifdef/bool は 1。variable は値定数なので一覧から除外
 - モード: スイッチ一覧  オプション: (なし)
-- 期待: LOCAL_LOG_ENABLE(x1,OFF), TOOL_TEST(x2,OFF), MODE(x1,OFF), variable(x1,OFF)
-- 実際の検出: LOCAL_LOG_ENABLE x1 OFF; MODE x1 OFF; TOOL_TEST x2 OFF; variable x1 OFF
+- 期待: LOCAL_LOG_ENABLE(x1,OFF), TOOL_TEST(x2,OFF), MODE(x1,OFF)
+- 実際の検出: LOCAL_LOG_ENABLE x1 OFF; MODE x1 OFF; TOOL_TEST x2 OFF
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### vc-list — valconst.c
+
+- 説明: 値定数: CFG_A(=100, 右辺値のみ)はスイッチ一覧から除外。TOOL_TEST の値候補に CFG_A は残る
+- モード: スイッチ一覧  オプション: (なし)
+- 期待: TOOL_TEST(x3,OFF)
+- 実際の検出: TOOL_TEST x3 OFF
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### vc-ext-none — valconst.c
+
+- 説明: 選択スイッチのみ有効/未選択: CFG_A=100 を尊重し 0==100 偽 → t_cfg は出ない
+- モード: 関数抽出  オプション: (なし)
+- 期待: 1件 → always(steps=1)
+- 非検出を期待: t1, t2, t_cfg
+- 実際の検出: L18 always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### vc-ext-1 — valconst.c
+
+- 説明: 選択スイッチのみ有効/TOOL_TEST=1: t1 のみ
+- モード: 関数抽出  オプション: -D TOOL_TEST=1
+- 期待: 2件 → t1(steps=1), always(steps=1)
+- 非検出を期待: t2, t_cfg
+- 実際の検出: L11 t1 (steps=1); L18 always (steps=1)
 - 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
 
 ### pin-default — pinned.c
@@ -298,6 +327,29 @@ void leg(void){ fl(); }
 #endif
 
 void always(void){ fk(); }
+```
+
+### tests/cases/valconst.c
+
+```c
+/* valconst.c - 値定数 (CFG_A) の扱いのテスト
+ * CFG_A は #define CFG_A 100 の値定数で、比較の右辺としてだけ使われる。
+ *   スイッチ一覧 : CFG_A は除外、TOOL_TEST の値候補に CFG_A は残る (1;2;CFG_A)
+ *   --external 未選択         : CFG_A=100 を尊重 → 0==100 偽 → t_cfg は出ない (always のみ)
+ *   --external -D TOOL_TEST=1 : t1, always
+ */
+#define TOOL_TEST 1
+#define CFG_A 100
+
+#if TOOL_TEST == 1
+int t1(void) { return 0; }
+#elif TOOL_TEST == 2
+int t2(void) { return 0; }
+#elif TOOL_TEST == CFG_A
+int t_cfg(void) { return 0; }
+#endif
+
+void always(void) { go(); }
 ```
 
 ### tests/cases/values.c
