@@ -61,6 +61,14 @@ TESTS = [
          desc="スイッチ一覧: 出現回数と状態",
          expect={"switches": {"CFG_A": (2, "OFF"), "CFG_B": (1, "OFF"), "VER": (1, "OFF")}}),
 
+    dict(id="pin-default", file="pinned.c", mode="scan", defines=[], ignore=False,
+         desc="ピン留め既定: ソース内 #define TOOL_TEST 0 が効き test_only は隠れる",
+         expect={"count": 1, "funcs": {"always": 1}, "absent": ["test_only"]}),
+
+    dict(id="pin-on", file="pinned.c", mode="scan", defines=["TOOL_TEST=1"], ignore=False,
+         desc="-D TOOL_TEST=1 をピン留め優先: 内蔵 #define TOOL_TEST 0 を無視し test_only を検出",
+         expect={"count": 2, "funcs": {"test_only": 1, "always": 1}, "absent": []}),
+
     dict(id="edge-known", file="edge.c", mode="scan", defines=[], ignore=False,
          desc="既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し",
          expect={"count": 1, "funcs": {"DEFINE_HANDLER": 1},

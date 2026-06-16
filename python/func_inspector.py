@@ -287,10 +287,14 @@ def _eval_expr(expr: str, defines: dict) -> int:
 # --------------------------------------------------------------------------
 # プリプロセス (条件コンパイル評価)
 # --------------------------------------------------------------------------
-def preprocess(clean: str, defines: dict) -> str:
+def preprocess(clean: str, defines: dict, pinned=None) -> str:
     """条件コンパイルを評価し、無効ブロックとディレクティブ行を空行化する。
     行番号を保つため行数は変えない。defines は破壊的に更新され得る (呼び元でコピー)。
+    pinned に入った名前は「-D/-U で固定」扱いで、ソース内の #define/#undef では
+    上書きされない (コマンドライン優先)。
     """
+    if pinned is None:
+        pinned = set()
     out = []
     stack = []  # 各フレーム: {'parent':bool, 'taken':bool, 'active':bool}
 
@@ -341,13 +345,13 @@ def preprocess(clean: str, defines: dict) -> str:
             elif kind == 'define':
                 if emitting():
                     mm = _IDENT.search(rest)
-                    if mm:
+                    if mm and mm.group(0) not in pinned:
                         after = rest[mm.end():].strip()
                         defines[mm.group(0)] = after if after else '1'
             elif kind == 'undef':
                 if emitting():
                     mm = _IDENT.search(rest)
-                    if mm and mm.group(0) in defines:
+                    if mm and mm.group(0) not in pinned and mm.group(0) in defines:
                         del defines[mm.group(0)]
             out.append('')  # ディレクティブ行自体は空行化
         else:
@@ -470,14 +474,14 @@ def _scan(clean):
     return results
 
 
-def find_functions(src, defines=None):
+def find_functions(src, defines=None, pinned=None):
     """関数定義を (line, name, steps) のリストで返す。
     defines が None なら条件コンパイルを無視 (全コード有効)。
-    dict (空可) を渡すとスイッチ評価を行う。
+    dict (空可) を渡すとスイッチ評価を行う。pinned は -D/-U で固定する名前集合。
     """
     clean = strip_comments_strings(src)
     if defines is not None:
-        clean = preprocess(clean, dict(defines))
+        clean = preprocess(clean, dict(defines), pinned)
     return _scan(clean)
 
 
@@ -509,21 +513,21 @@ def _read(path):
         return None
 
 
-def analyze_file(path, defines=None):
+def analyze_file(path, defines=None, pinned=None):
     src = _read(path)
     if src is None:
         return []
-    return [(path, line, name, steps) for (line, name, steps) in find_functions(src, defines)]
+    return [(path, line, name, steps) for (line, name, steps) in find_functions(src, defines, pinned)]
 
 
-def analyze_paths(paths, exts, defines=None, progress=None):
+def analyze_paths(paths, exts, defines=None, pinned=None, progress=None):
     files = gather_files(paths, exts)
     total = len(files)
     rows = []
     for idx, fp in enumerate(files, 1):
         if progress:
             progress(idx, total, fp)
-        rows.extend(analyze_file(fp, defines))
+        rows.extend(analyze_file(fp, defines, pinned))
     return rows
 
 
@@ -690,9 +694,9 @@ def run_gui():
             w.config(state=st)
 
     # --- ワーカ (別スレッド) ---
-    def worker_scan(p, exts, defines):
+    def worker_scan(p, exts, defines, pinned):
         try:
-            rows = analyze_paths([p], exts, defines,
+            rows = analyze_paths([p], exts, defines, pinned,
                                  progress=lambda i, t, f: q.put(("progress", i, t, f)))
             q.put(("scan_done", rows))
         except Exception as e:  # noqa
@@ -766,9 +770,10 @@ def run_gui():
             return
         exts = _parse_exts(ext_var.get())
         defines = None if ignore_var.get() else selected_defines()
+        pinned = set(defines.keys()) if defines else None
         set_busy(True)
         status.set("スキャン中...")
-        threading.Thread(target=worker_scan, args=(p, exts, defines), daemon=True).start()
+        threading.Thread(target=worker_scan, args=(p, exts, defines, pinned), daemon=True).start()
 
     def do_save():
         if not state["rows"]:
@@ -820,16 +825,24 @@ def _cli_progress_done():
 
 
 def _build_defines(define_args, undef_args):
+    """-> (defines, pinned)。pinned はコマンドラインで指定した名前集合 (-D/-U)。
+    pinned の名前はソース内の #define/#undef より優先される。"""
     defines = {}
+    pinned = set()
     for d in (define_args or []):
         if '=' in d:
             name, val = d.split('=', 1)
-            defines[name.strip()] = val
+            name = name.strip()
+            defines[name] = val
         else:
-            defines[d.strip()] = '1'
+            name = d.strip()
+            defines[name] = '1'
+        pinned.add(name)
     for u in (undef_args or []):
-        defines.pop(u.strip(), None)
-    return defines
+        name = u.strip()
+        defines.pop(name, None)
+        pinned.add(name)
+    return defines, pinned
 
 
 def main(argv=None):
@@ -855,7 +868,7 @@ def main(argv=None):
         return run_gui()
 
     exts = _parse_exts(args.ext)
-    defines = _build_defines(args.define, args.undef)
+    defines, pinned = _build_defines(args.define, args.undef)
 
     # スイッチ一覧モード
     if args.list_switches:
@@ -876,7 +889,7 @@ def main(argv=None):
 
     # 関数抽出モード
     use_defines = None if args.ignore_switches else defines
-    rows = analyze_paths(args.paths, exts, use_defines, progress=_cli_progress)
+    rows = analyze_paths(args.paths, exts, use_defines, pinned, progress=_cli_progress)
     _cli_progress_done()
     lines = []
     if not args.no_header:

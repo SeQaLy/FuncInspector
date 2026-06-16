@@ -2,7 +2,7 @@
 
 `python tests/run_tests.py` で再実行できます。各テストは **期待値(アンカー)** と **3実装の相互一致** の両方を検証します。
 
-- 実行日時: 2026-06-16 23:05:26
+- 実行日時: 2026-06-16 23:25:11
 - 検証した実装: Python, C, PowerShell
 - C: gcc でビルドして検証
 - PowerShell: `pwsh.EXE` で検証
@@ -18,6 +18,8 @@
 | `switch-VER2` | -D VER=2: #if VER>=2 を式評価で真 | PASS | PASS | PASS | ✅ |
 | `switch-CFG_B` | -D CFG_B: #elif defined(CFG_B) を真 | PASS | PASS | PASS | ✅ |
 | `switch-list` | スイッチ一覧: 出現回数と状態 | PASS | PASS | PASS | ✅ |
+| `pin-default` | ピン留め既定: ソース内 #define TOOL_TEST 0 が効き test_only は隠れる | PASS | PASS | PASS | ✅ |
+| `pin-on` | -D TOOL_TEST=1 をピン留め優先: 内蔵 #define TOOL_TEST 0 を無視し test_only を検出 | PASS | PASS | PASS | ✅ |
 | `edge-known` | 既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し | PASS | PASS | PASS | ✅ |
 
 ## テストデータと結果の詳細
@@ -73,6 +75,23 @@
 - モード: スイッチ一覧  オプション: (なし)
 - 期待: CFG_A(x2,OFF), CFG_B(x1,OFF), VER(x1,OFF)
 - 実際の検出: CFG_A x2 OFF; CFG_B x1 OFF; VER x1 OFF
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### pin-default — pinned.c
+
+- 説明: ピン留め既定: ソース内 #define TOOL_TEST 0 が効き test_only は隠れる
+- モード: 関数抽出  オプション: (なし)
+- 期待: 1件 → always(steps=1)
+- 非検出を期待: test_only
+- 実際の検出: L15 always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### pin-on — pinned.c
+
+- 説明: -D TOOL_TEST=1 をピン留め優先: 内蔵 #define TOOL_TEST 0 を無視し test_only を検出
+- モード: 関数抽出  オプション: -D TOOL_TEST=1
+- 期待: 2件 → test_only(steps=1), always(steps=1)
+- 実際の検出: L9 test_only (steps=1); L15 always (steps=1)
 - 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
 
 ### edge-known — edge.c
@@ -153,6 +172,29 @@ int a;
 int b;
 {
     return a + b;
+}
+```
+
+### tests/cases/pinned.c
+
+```c
+/* pinned.c - コマンドライン -D がソース内の #define より優先(ピン留め)されるか
+ * 期待:
+ *   既定           : always のみ (#define TOOL_TEST 0 が効く)
+ *   -D TOOL_TEST=1 : test_only と always (ピン留めで in-file #define を無視)
+ */
+#define TOOL_TEST 0
+
+#if TOOL_TEST == 1
+int test_only(void)
+{
+    return 0;
+}
+#endif
+
+void always(void)
+{
+    ping();
 }
 ```
 

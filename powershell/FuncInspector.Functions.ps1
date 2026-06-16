@@ -269,7 +269,7 @@ namespace FuncInspectorNative {
     static long EvalIf(char[] b,int s,int e,Dictionary<string,string> defs){
       var p=new Pr(Tokenize(b,s,e),defs); try { return p.Or()!=0?1:0; } catch { return 0; } }
 
-    public static string Preprocess(string clean,Dictionary<string,string> defs){
+    public static string Preprocess(string clean,Dictionary<string,string> defs,HashSet<string> pinned){
       char[] b=clean.ToCharArray(); int n=b.Length;
       var par=new List<bool>(); var tak=new List<bool>(); var act=new List<bool>();
       int ls=0;
@@ -284,8 +284,8 @@ namespace FuncInspectorNative {
           else if(kind==4){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ bool cond=EvalIf(b,rest,le,defs)!=0; act[idx]=cond; if(cond)tak[idx]=true; } else act[idx]=false; } }
           else if(kind==5){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ act[idx]=true; tak[idx]=true; } else act[idx]=false; } }
           else if(kind==6){ int idx=act.Count-1; if(idx>=0){ par.RemoveAt(idx); tak.RemoveAt(idx); act.RemoveAt(idx); } }
-          else if(kind==7){ if(emit){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null){ int vs=after; while(vs<le && (b[vs]==' '||b[vs]=='\t')) vs++; int ve=le; while(ve>vs && (b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r')) ve--; string val= ve>vs? new string(b,vs,ve-vs) : "1"; defs[nm]=val; } } }
-          else if(kind==8){ if(emit){ string nm=FirstIdent(b,rest,le); if(nm!=null && defs.ContainsKey(nm)) defs.Remove(nm); } }
+          else if(kind==7){ if(emit){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null && !pinned.Contains(nm)){ int vs=after; while(vs<le && (b[vs]==' '||b[vs]=='\t')) vs++; int ve=le; while(ve>vs && (b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r')) ve--; string val= ve>vs? new string(b,vs,ve-vs) : "1"; defs[nm]=val; } } }
+          else if(kind==8){ if(emit){ string nm=FirstIdent(b,rest,le); if(nm!=null && !pinned.Contains(nm) && defs.ContainsKey(nm)) defs.Remove(nm); } }
         } else { if(!emit) blank=true; }
         if(blank){ for(int p=ls;p<le;p++) b[p]=' '; }
         if(le>=n) break; ls=le+1;
@@ -325,9 +325,9 @@ namespace FuncInspectorNative {
       return res;
     }
 
-    public static List<Row> Analyze(string path,string src,Dictionary<string,string> defs,bool ignore){
+    public static List<Row> Analyze(string path,string src,Dictionary<string,string> defs,bool ignore,HashSet<string> pinned){
       string clean=Strip(src);
-      if(!ignore){ var d=new Dictionary<string,string>(defs); clean=Preprocess(clean,d); }
+      if(!ignore){ var d=new Dictionary<string,string>(defs); clean=Preprocess(clean,d,pinned); }
       return Scan(path,clean);
     }
     public static List<Sw> CollectSwitches(string src){
@@ -445,7 +445,7 @@ function Test-FiEmitting {
 }
 
 function Invoke-FiPreprocess {
-    param([string]$Clean, [hashtable]$Defines)
+    param([string]$Clean, [hashtable]$Defines, [hashtable]$Pinned = @{})
     $out = New-Object System.Collections.Generic.List[string]
     $stack = New-Object System.Collections.Generic.List[object]
     foreach ($line in ($Clean -split "`n")) {
@@ -491,7 +491,7 @@ function Invoke-FiPreprocess {
                 'define' {
                     if (Test-FiEmitting $stack) {
                         $idm = $script:FiRxId.Match($rest)
-                        if ($idm.Success) {
+                        if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value)) {
                             $after = $rest.Substring($idm.Index + $idm.Length).Trim()
                             if ($after -eq '') { $after = '1' }
                             $Defines[$idm.Value] = $after
@@ -501,7 +501,7 @@ function Invoke-FiPreprocess {
                 'undef' {
                     if (Test-FiEmitting $stack) {
                         $idm = $script:FiRxId.Match($rest)
-                        if ($idm.Success -and $Defines.ContainsKey($idm.Value)) { $Defines.Remove($idm.Value) }
+                        if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value) -and $Defines.ContainsKey($idm.Value)) { $Defines.Remove($idm.Value) }
                     }
                 }
             }
@@ -658,6 +658,7 @@ function Find-CFunctions {
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [hashtable]$Defines,
+        [string[]]$Pinned,
         [switch]$IgnoreSwitches
     )
     try { $src = [System.IO.File]::ReadAllText($FilePath) }
@@ -666,13 +667,17 @@ function Find-CFunctions {
     if (Initialize-FiNative) {
         $nd = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         if ($Defines) { foreach ($k in $Defines.Keys) { $nd[[string]$k] = [string]$Defines[$k] } }
-        return $script:FiNativeType::Analyze($FilePath, $src, $nd, [bool]$IgnoreSwitches)
+        $np = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($p in ($Pinned | Where-Object { $_ })) { [void]$np.Add([string]$p) }
+        return $script:FiNativeType::Analyze($FilePath, $src, $nd, [bool]$IgnoreSwitches, $np)
     }
 
     $clean = Remove-FICommentsStrings $src
     if (-not $IgnoreSwitches) {
         $d = if ($Defines) { $Defines.Clone() } else { @{} }
-        $clean = Invoke-FiPreprocess $clean $d
+        $pin = @{}
+        foreach ($p in ($Pinned | Where-Object { $_ })) { $pin[[string]$p] = $true }
+        $clean = Invoke-FiPreprocess $clean $d $pin
     }
     return Get-FiScan $FilePath $clean
 }
@@ -782,9 +787,10 @@ function Show-FuncInspectorGui {
             $sync.Total = $files.Count
             $rows = New-Object System.Collections.Generic.List[object]
             $i = 0
+            $pinned = [string[]]$defines.Keys
             foreach ($f in $files) {
                 $i++; $sync.Progress = $i; $sync.Current = $f
-                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -IgnoreSwitches:$ignore)) { $rows.Add($r) }
+                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore)) { $rows.Add($r) }
             }
             $sync.Result = $rows
         } catch { $sync.Error = $_.Exception.Message }
@@ -926,13 +932,15 @@ function Invoke-FuncInspector {
 
     if ($Gui -or (-not $Path -or $Path.Count -eq 0)) { Show-FuncInspectorGui; return }
 
-    # defines 構築
+    # defines 構築 (+ pinned: -D/-U で固定する名前)
     $defines = @{}
+    $pinned = New-Object System.Collections.Generic.List[string]
     foreach ($d in ($Define | Where-Object { $_ })) {
-        if ($d.Contains('=')) { $kv = $d.Split('=', 2); $defines[$kv[0].Trim()] = $kv[1] }
-        else { $defines[$d.Trim()] = '1' }
+        if ($d.Contains('=')) { $kv = $d.Split('=', 2); $n = $kv[0].Trim(); $defines[$n] = $kv[1] }
+        else { $n = $d.Trim(); $defines[$n] = '1' }
+        $pinned.Add($n)
     }
-    foreach ($u in ($Undef | Where-Object { $_ })) { $defines.Remove($u.Trim()) }
+    foreach ($u in ($Undef | Where-Object { $_ })) { $n = $u.Trim(); $defines.Remove($n); $pinned.Add($n) }
 
     # スイッチ一覧モード
     if ($ListSwitches) {
@@ -959,7 +967,7 @@ function Invoke-FuncInspector {
     foreach ($f in $files) {
         $i++
         Write-Progress -Activity 'FuncInspector' -Status ("解析 {0}/{1} {2}" -f $i, $total, $f) -PercentComplete ($(if ($total) { $i * 100 / $total } else { 100 }))
-        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -IgnoreSwitches:$IgnoreSwitches)) { $rows.Add($r) }
+        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned.ToArray() -IgnoreSwitches:$IgnoreSwitches)) { $rows.Add($r) }
     }
     Write-Progress -Activity 'FuncInspector' -Completed
     if ($AsObject) { return $rows }

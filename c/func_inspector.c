@@ -113,6 +113,7 @@ static FILE *g_out = NULL;
 static long  g_func_total = 0;
 static long  g_step_total = 0;
 static Defs  g_defines;
+static Defs  g_pinned;           /* -D/-U で固定する名前 (値は未使用) */
 static long  g_file_total = 0;   /* 進捗表示用: 対象ファイル総数 */
 static long  g_file_idx = 0;     /* 進捗表示用: 処理済み数 */
 
@@ -409,7 +410,8 @@ static void preprocess(char *buf, size_t n, Defs *d) {
                     break; }
                 case D_ENDIF: { if (sp > 0) sp--; break; }
                 case D_DEFINE: {
-                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)) {
+                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)
+                        && !defs_has(&g_pinned, nm)) {
                         size_t vs = after; while (vs < le && (buf[vs]==' '||buf[vs]=='\t')) vs++;
                         size_t ve = le; while (ve > vs && (buf[ve-1]==' '||buf[ve-1]=='\t'||buf[ve-1]=='\r')) ve--;
                         char val[256]; size_t vlen = ve - vs; if (vlen >= sizeof(val)) vlen = sizeof(val)-1;
@@ -418,7 +420,8 @@ static void preprocess(char *buf, size_t n, Defs *d) {
                     }
                     break; }
                 case D_UNDEF: {
-                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)) defs_remove(d, nm);
+                    if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after)
+                        && !defs_has(&g_pinned, nm)) defs_remove(d, nm);
                     break; }
             }
         } else {
@@ -677,9 +680,16 @@ static void add_define(const char *arg) {
         char name[128]; size_t len = eq - arg; if (len >= sizeof(name)) len = sizeof(name)-1;
         memcpy(name, arg, len); name[len] = '\0';
         defs_set(&g_defines, name, eq + 1);
+        defs_set(&g_pinned, name, "");      /* コマンドライン優先で固定 */
     } else {
         defs_set(&g_defines, arg, "1");
+        defs_set(&g_pinned, arg, "");
     }
+}
+
+static void add_undef(const char *name) {
+    defs_remove(&g_defines, name);
+    defs_set(&g_pinned, name, "");          /* 未定義のまま固定 */
 }
 
 static void usage(const char *prog) {
@@ -700,6 +710,7 @@ int main(int argc, char **argv) {
     const char *paths[256]; int npaths = 0;
     const char *outfile = NULL; const char *extarg = ".c,.h";
     defs_init(&g_defines);
+    defs_init(&g_pinned);
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--ext") && i + 1 < argc) extarg = argv[++i];
@@ -710,8 +721,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--ignore-switches")) g_ignore_switches = 1;
         else if (!strcmp(argv[i], "-D") && i + 1 < argc) add_define(argv[++i]);
         else if (!strncmp(argv[i], "-D", 2) && argv[i][2]) add_define(argv[i] + 2);
-        else if (!strcmp(argv[i], "-U") && i + 1 < argc) defs_remove(&g_defines, argv[++i]);
-        else if (!strncmp(argv[i], "-U", 2) && argv[i][2]) defs_remove(&g_defines, argv[i] + 2);
+        else if (!strcmp(argv[i], "-U") && i + 1 < argc) add_undef(argv[++i]);
+        else if (!strncmp(argv[i], "-U", 2) && argv[i][2]) add_undef(argv[i] + 2);
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
         else if (npaths < 256) paths[npaths++] = argv[i];
     }
@@ -749,5 +760,6 @@ int main(int argc, char **argv) {
     if (!g_list_switches)
         fprintf(stderr, "%ld 関数 / 合計 %ld ステップ\n", g_func_total, g_step_total);
     defs_free(&g_defines);
+    defs_free(&g_pinned);
     return 0;
 }
