@@ -104,6 +104,14 @@ TESTS = [
          desc="--external-switches -D TOOL_TEST=2: t2 が出る (==1 は出ない)",
          expect={"count": 2, "funcs": {"t2": 1, "always": 1}, "absent": ["t1"]}),
 
+    dict(id="inc-light", file="incmain.c", mode="scan", defines=[], ignore=False,
+         desc="軽量(include解決なし): inccfg.h を読まないので TOOL_TEST 未定義 → inc_always のみ",
+         expect={"count": 1, "funcs": {"inc_always": 1}, "absent": ["inc_t1", "inc_t2"]}),
+
+    dict(id="inc-resolve", file="incmain.c", mode="scan", defines=[], ignore=False, resolve=True,
+         desc="--resolve-includes: inccfg.h の TOOL_TEST=1 を反映 → inc_t1, inc_always",
+         expect={"count": 2, "funcs": {"inc_t1": 1, "inc_always": 1}, "absent": ["inc_t2"]}),
+
     dict(id="edge-known", file="edge.c", mode="scan", defines=[], ignore=False,
          desc="既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し",
          expect={"count": 1, "funcs": {"DEFINE_HANDLER": 1},
@@ -156,6 +164,8 @@ def run_ps(ps, t):
         a += ["-IgnoreSwitches"]
     if t.get("external"):
         a += ["-ExternalSwitches"]
+    if t.get("resolve"):
+        a += ["-ResolveIncludes"]
     return _run(a)
 
 
@@ -170,6 +180,8 @@ def _flags_common(t):
         a += ["--ignore-switches"]
     if t.get("external"):
         a += ["--external-switches"]
+    if t.get("resolve"):
+        a += ["--resolve-includes"]
     return a
 
 

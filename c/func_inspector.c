@@ -438,6 +438,146 @@ static void preprocess(char *buf, size_t n, Defs *d, Defs *vc) {
     }
 }
 
+/* ---- include 追従プリプロセス (スイッチ追跡モード) ---------------------- */
+static int   g_resolve = 0;
+static char  g_incdirs[64][1024];
+static int   g_incdir_count = 0;
+static char  g_inc_stack[64][2048];
+static int   g_inc_sp = 0;
+
+/* コメントのみ空白化 (文字列はそのまま残す。include ターゲット保持用) */
+static void strip_comments(char *buf, size_t n) {
+    char *src = (char *)malloc(n + 1);
+    if (!src) return;
+    memcpy(src, buf, n);
+    size_t i = 0, o = 0;
+    while (i < n) {
+        char c = src[i];
+        if (c == '/' && i + 1 < n && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') { buf[o++] = ' '; i++; }
+        } else if (c == '/' && i + 1 < n && src[i + 1] == '*') {
+            buf[o++] = ' '; buf[o++] = ' '; i += 2;
+            while (i < n && !(src[i] == '*' && i + 1 < n && src[i + 1] == '/')) {
+                buf[o++] = (src[i] == '\n') ? '\n' : ' '; i++;
+            }
+            if (i < n) { buf[o++] = ' '; buf[o++] = ' '; i += 2; }
+        } else if (c == '"' || c == '\'') {
+            char q = c; buf[o++] = c; i++;
+            while (i < n && src[i] != q) {
+                if (src[i] == '\\' && i + 1 < n) { buf[o++] = src[i]; buf[o++] = src[i + 1]; i += 2; }
+                else { buf[o++] = src[i]; i++; }
+            }
+            if (i < n) { buf[o++] = src[i]; i++; }
+        } else { buf[o++] = c; i++; }
+    }
+    free(src);
+}
+
+static int file_exists(const char *p) { FILE *f = fopen(p, "rb"); if (f) { fclose(f); return 1; } return 0; }
+
+static void dirname_of(const char *path, char *out, size_t outsz) {
+    strncpy(out, path, outsz - 1); out[outsz - 1] = '\0';
+    char *s1 = strrchr(out, '/'); char *s2 = strrchr(out, '\\');
+    char *s = (s1 > s2) ? s1 : s2;
+    if (s) *s = '\0'; else strcpy(out, ".");
+}
+
+static int resolve_include(const char *name, const char *base_dir, char *out, size_t outsz) {
+    char cand[4096];
+    snprintf(cand, sizeof(cand), "%.2000s%c%.1024s", base_dir, PATH_SEP, name);
+    if (file_exists(cand)) { snprintf(out, outsz, "%.2000s", cand); return 1; }
+    for (int i = 0; i < g_incdir_count; ++i) {
+        snprintf(cand, sizeof(cand), "%.2000s%c%.1024s", g_incdirs[i], PATH_SEP, name);
+        if (file_exists(cand)) { snprintf(out, outsz, "%.2000s", cand); return 1; }
+    }
+    return 0;
+}
+
+/* `#include "name"` (引用符) なら name を out に入れ 1 を返す。<...> は 0。 */
+static int parse_include(const char *buf, size_t ls, size_t le, char *out, size_t outsz) {
+    size_t p = ls;
+    while (p < le && (buf[p] == ' ' || buf[p] == '\t')) p++;
+    if (p >= le || buf[p] != '#') return 0;
+    p++;
+    while (p < le && (buf[p] == ' ' || buf[p] == '\t')) p++;
+    if (le - p < 7 || memcmp(buf + p, "include", 7) != 0) return 0;
+    p += 7;
+    while (p < le && (buf[p] == ' ' || buf[p] == '\t')) p++;
+    if (p >= le || buf[p] != '"') return 0;
+    p++;
+    size_t s = p; while (p < le && buf[p] != '"') p++;
+    size_t len = p - s; if (len >= outsz) len = outsz - 1;
+    memcpy(out, buf + s, len); out[len] = '\0';
+    return 1;
+}
+
+static char *read_file(const char *path, size_t *out_n);  /* 前方宣言 */
+
+/* buf を条件評価しつつ include をたどり d を更新。collect=1 で無効/ディレクティブ/
+   include 行を空白化 (対象 .c 用)。collect=0 はヘッダ処理 (副作用のみ)。 */
+static void pp_process(char *buf, size_t n, Defs *d, const char *base_dir, int collect, int depth) {
+    int par[MAX_PP_DEPTH], tak[MAX_PP_DEPTH], act[MAX_PP_DEPTH];
+    int sp = 0;
+    size_t ls = 0;
+    while (ls <= n) {
+        size_t le = ls; while (le < n && buf[le] != '\n') le++;
+        int emit = 1;
+        for (int i = 0; i < sp; ++i) if (!act[i]) { emit = 0; break; }
+        size_t rest; int kind = parse_directive(buf, ls, le, &rest);
+        int blank = 0;
+        char nm[64]; size_t after;
+        if (kind != D_NONE) {
+            blank = 1;
+            switch (kind) {
+                case D_IFDEF: { int parent = emit;
+                    int cond = first_ident(buf, rest, le, nm, sizeof(nm), &after) && defs_has(d, nm);
+                    if (sp < MAX_PP_DEPTH) { par[sp]=parent; tak[sp]=(parent&&cond); act[sp]=(parent&&cond); sp++; } break; }
+                case D_IFNDEF: { int parent = emit;
+                    int cond = !(first_ident(buf, rest, le, nm, sizeof(nm), &after) && defs_has(d, nm));
+                    if (sp < MAX_PP_DEPTH) { par[sp]=parent; tak[sp]=(parent&&cond); act[sp]=(parent&&cond); sp++; } break; }
+                case D_IF: { int parent = emit;
+                    int cond = parent ? eval_if(buf, rest, le, d) : 0;
+                    if (sp < MAX_PP_DEPTH) { par[sp]=parent; tak[sp]=(parent&&cond); act[sp]=(parent&&cond); sp++; } break; }
+                case D_ELIF: { if (sp > 0) { int i = sp - 1;
+                    if (par[i] && !tak[i]) { int cond = eval_if(buf, rest, le, d); act[i] = cond; if (cond) tak[i] = 1; }
+                    else act[i] = 0; } break; }
+                case D_ELSE: { if (sp > 0) { int i = sp - 1; if (par[i] && !tak[i]) { act[i]=1; tak[i]=1; } else act[i]=0; } break; }
+                case D_ENDIF: { if (sp > 0) sp--; break; }
+                case D_DEFINE: { if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after) && !defs_has(&g_pinned, nm)) {
+                    size_t vs = after; while (vs < le && (buf[vs]==' '||buf[vs]=='\t')) vs++;
+                    size_t ve = le; while (ve > vs && (buf[ve-1]==' '||buf[ve-1]=='\t'||buf[ve-1]=='\r')) ve--;
+                    char val[256]; size_t vlen = ve - vs; if (vlen >= sizeof(val)) vlen = sizeof(val)-1;
+                    memcpy(val, buf + vs, vlen); val[vlen] = '\0'; defs_set(d, nm, vlen ? val : "1"); } break; }
+                case D_UNDEF: { if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after) && !defs_has(&g_pinned, nm)) defs_remove(d, nm); break; }
+            }
+        } else {
+            char incname[1024];
+            if (emit && depth < 40 && parse_include(buf, ls, le, incname, sizeof(incname))) {
+                blank = 1;
+                char hp[2048];
+                if (resolve_include(incname, base_dir, hp, sizeof(hp))) {
+                    int dup = 0; for (int i = 0; i < g_inc_sp; ++i) if (strcmp(g_inc_stack[i], hp) == 0) { dup = 1; break; }
+                    if (!dup) {
+                        size_t hn; char *hb = read_file(hp, &hn);
+                        if (hb) {
+                            strip_comments(hb, hn);
+                            char hbase[2048]; dirname_of(hp, hbase, sizeof(hbase));
+                            if (g_inc_sp < 64) { snprintf(g_inc_stack[g_inc_sp], sizeof(g_inc_stack[0]), "%s", hp); g_inc_sp++;
+                                pp_process(hb, hn, d, hbase, 0, depth + 1); g_inc_sp--; }
+                            free(hb);
+                        }
+                    }
+                }
+            } else {
+                if (!emit) blank = 1;
+            }
+        }
+        if (collect && blank) for (size_t p = ls; p < le; ++p) buf[p] = ' ';
+        if (le >= n) break;
+        ls = le + 1;
+    }
+}
+
 /* ---- 行頭オフセット表 / ステップ数 -------------------------------------- */
 static size_t *build_line_starts(const char *buf, size_t n, size_t *out_cnt) {
     size_t cap = 64, cnt = 0;
@@ -697,6 +837,19 @@ static char *read_file(const char *path, size_t *out_n) {
 static void analyze_file(const char *path) {
     size_t n; char *buf = read_file(path, &n);
     if (!buf) return;
+    if (g_resolve && !g_ignore_switches) {
+        /* スイッチ追跡モード: include をたどってから関数を走査 */
+        strip_comments(buf, n);                 /* include 文字列を残す */
+        Defs d; defs_clone(&g_defines, &d);
+        char base[2048]; dirname_of(path, base, sizeof(base));
+        g_inc_sp = 0;
+        pp_process(buf, n, &d, base, 1, 0);
+        strip_comments_strings(buf, n);         /* 走査前に文字列を空白化 */
+        defs_free(&d);
+        scan_functions(path, buf, n);
+        free(buf);
+        return;
+    }
     strip_comments_strings(buf, n);
     if (!g_ignore_switches) {
         Defs d; defs_clone(&g_defines, &d);
@@ -813,6 +966,8 @@ static void usage(const char *prog) {
         "  -U NAME             スイッチを OFF (未定義)\n"
         "  --ignore-switches   条件コンパイルを無視して全コードを対象\n"
         "  --external-switches ソース内 #define/#undef を無視 (スイッチは -D 選択のみ)\n"
+        "  --resolve-includes  [重い] プロジェクト include (\"...\") をたどってマクロを解決\n"
+        "  -I DIR              include 検索パス (--resolve-includes 用)\n"
         "  --ext .c,.h         対象拡張子 (既定 .c,.h)\n"
         "  --no-header         先頭のヘッダ行を付けない (既定は付ける)\n"
         "  --out FILE          出力先 (既定 標準出力)\n"
@@ -833,6 +988,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--list-switches")) g_list_switches = 1;
         else if (!strcmp(argv[i], "--ignore-switches")) g_ignore_switches = 1;
         else if (!strcmp(argv[i], "--external-switches")) g_external = 1;
+        else if (!strcmp(argv[i], "--resolve-includes")) g_resolve = 1;
+        else if (!strcmp(argv[i], "-I") && i + 1 < argc) {
+            if (g_incdir_count < 64) { strncpy(g_incdirs[g_incdir_count], argv[++i], 1023); g_incdirs[g_incdir_count][1023] = '\0'; g_incdir_count++; }
+        }
+        else if (!strncmp(argv[i], "-I", 2) && argv[i][2]) {
+            if (g_incdir_count < 64) { strncpy(g_incdirs[g_incdir_count], argv[i] + 2, 1023); g_incdirs[g_incdir_count][1023] = '\0'; g_incdir_count++; }
+        }
         else if (!strcmp(argv[i], "-D") && i + 1 < argc) add_define(argv[++i]);
         else if (!strncmp(argv[i], "-D", 2) && argv[i][2]) add_define(argv[i] + 2);
         else if (!strcmp(argv[i], "-U") && i + 1 < argc) add_undef(argv[++i]);

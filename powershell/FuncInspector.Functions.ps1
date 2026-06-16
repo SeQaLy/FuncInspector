@@ -147,6 +147,7 @@ if (-not (Get-Variable -Name FuncInspectorKeywords -Scope Script -ErrorAction Si
 }
 $script:FiRxDir = [regex]'^\s*#\s*(ifdef|ifndef|if|elif|else|endif|define|undef)\b(.*)$'
 $script:FiRxId = [regex]'[A-Za-z_]\w*'
+$script:FiRxInc = [regex]'^\s*#\s*include\s*"([^"]+)"'
 # このファイル自身のパス (GUI のバックグラウンド runspace から再読込するため)
 $script:FiScriptPath = $PSCommandPath
 
@@ -160,11 +161,11 @@ function Initialize-FiNative {
     $script:FiNativeTried = $true
     # 名前空間にバージョンを付与: C# のシグネチャを変えたら必ず番号を上げること。
     # こうすると、同一プロセスに残った旧版の型と衝突せず、更新後の型を必ずコンパイルできる。
-    try { $script:FiNativeType = [FuncInspectorNativeV5.Engine]; return $true } catch {}
+    try { $script:FiNativeType = [FuncInspectorNativeV6.Engine]; return $true } catch {}
     $code = @'
 using System;
 using System.Collections.Generic;
-namespace FuncInspectorNativeV5 {
+namespace FuncInspectorNativeV6 {
   public class Row { public string File; public int Line; public string Function; public int Steps; }
   public class Sw  { public string Name; public int Count; public int Line; public List<string> Vals = new List<string>(); }
   public static class Engine {
@@ -365,12 +366,78 @@ namespace FuncInspectorNativeV5 {
       foreach(var kv in map){ if(vc.Contains(kv.Key)) continue; var s=new Sw{Name=kv.Key,Count=kv.Value.Count,Line=kv.Value.Line}; s.Vals.AddRange(kv.Value.Vals); list.Add(s); }
       return list;
     }
+
+    // ---- include 追従 (スイッチ追跡モード) ----
+    static string StripComments(string src){
+      int n=src.Length; var o=new System.Text.StringBuilder(n); int i=0;
+      while(i<n){ char c=src[i];
+        if(c=='/' && i+1<n && src[i+1]=='/'){ while(i<n && src[i]!='\n'){o.Append(' ');i++;} }
+        else if(c=='/' && i+1<n && src[i+1]=='*'){ o.Append("  "); i+=2; while(i<n && !(src[i]=='*'&&i+1<n&&src[i+1]=='/')){ o.Append(src[i]=='\n'?'\n':' '); i++; } if(i<n){o.Append("  ");i+=2;} }
+        else if(c=='"'||c=='\''){ char q=c; o.Append(c); i++; while(i<n && src[i]!=q){ if(src[i]=='\\'&&i+1<n){o.Append(src[i]);o.Append(src[i+1]);i+=2;} else {o.Append(src[i]);i++;} } if(i<n){o.Append(src[i]);i++;} }
+        else { o.Append(c); i++; }
+      }
+      return o.ToString();
+    }
+    static string ResolveInclude(string name, string baseDir, string[] incDirs){
+      try{ string cand=System.IO.Path.Combine(baseDir,name); if(System.IO.File.Exists(cand)) return System.IO.Path.GetFullPath(cand); }catch{}
+      if(incDirs!=null) foreach(var dd in incDirs){ try{ string cand=System.IO.Path.Combine(dd,name); if(System.IO.File.Exists(cand)) return System.IO.Path.GetFullPath(cand); }catch{} }
+      return null;
+    }
+    static string ParseInclude(char[] b,int ls,int le){
+      int p=ls; while(p<le && (b[p]==' '||b[p]=='\t')) p++;
+      if(p>=le || b[p]!='#') return null; p++;
+      while(p<le && (b[p]==' '||b[p]=='\t')) p++;
+      if(le-p<7) return null; string kw="include"; for(int k=0;k<7;k++) if(b[p+k]!=kw[k]) return null; p+=7;
+      while(p<le && (b[p]==' '||b[p]=='\t')) p++;
+      if(p>=le || b[p]!='"') return null; p++;
+      int s=p; while(p<le && b[p]!='"') p++;
+      return new string(b,s,p-s);
+    }
+    static void PpProcess(char[] b, Dictionary<string,string> d, HashSet<string> pinned, string baseDir, bool collect, int depth, string[] incDirs, HashSet<string> seen){
+      int n=b.Length; var par=new List<bool>(); var tak=new List<bool>(); var act=new List<bool>(); int ls=0;
+      while(ls<=n){ int le=ls; while(le<n && b[le]!='\n') le++;
+        bool emit=true; for(int k=0;k<act.Count;k++){ if(!act[k]){emit=false;break;} }
+        int rest; int kind=ParseDirective(b,ls,le,out rest); bool blank=false;
+        if(kind!=0){ blank=true;
+          if(kind==1){ string nm=FirstIdent(b,rest,le); bool cond=nm!=null && d.ContainsKey(nm); par.Add(emit); tak.Add(emit&&cond); act.Add(emit&&cond); }
+          else if(kind==2){ string nm=FirstIdent(b,rest,le); bool cond=(nm==null)||!d.ContainsKey(nm); par.Add(emit); tak.Add(emit&&cond); act.Add(emit&&cond); }
+          else if(kind==3){ bool cond=emit && (EvalIf(b,rest,le,d)!=0); par.Add(emit); tak.Add(emit&&cond); act.Add(emit&&cond); }
+          else if(kind==4){ int idx=act.Count-1; if(idx>=0){ if(par[idx]&&!tak[idx]){ bool cond=EvalIf(b,rest,le,d)!=0; act[idx]=cond; if(cond)tak[idx]=true; } else act[idx]=false; } }
+          else if(kind==5){ int idx=act.Count-1; if(idx>=0){ if(par[idx]&&!tak[idx]){act[idx]=true;tak[idx]=true;} else act[idx]=false; } }
+          else if(kind==6){ int idx=act.Count-1; if(idx>=0){ par.RemoveAt(idx);tak.RemoveAt(idx);act.RemoveAt(idx); } }
+          else if(kind==7){ if(emit){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null && !pinned.Contains(nm)){ int vs=after; while(vs<le&&(b[vs]==' '||b[vs]=='\t'))vs++; int ve=le; while(ve>vs&&(b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r'))ve--; string val=ve>vs?new string(b,vs,ve-vs):"1"; d[nm]=val; } } }
+          else if(kind==8){ if(emit){ string nm=FirstIdent(b,rest,le); if(nm!=null && !pinned.Contains(nm) && d.ContainsKey(nm)) d.Remove(nm); } }
+        } else {
+          string inc = (emit && depth<40) ? ParseInclude(b,ls,le) : null;
+          if(inc!=null){ blank=true;
+            string hp=ResolveInclude(inc,baseDir,incDirs);
+            if(hp!=null && !seen.Contains(hp)){
+              string hsrc=null; try{ hsrc=System.IO.File.ReadAllText(hp); }catch{}
+              if(hsrc!=null){ char[] hb=StripComments(hsrc).ToCharArray(); seen.Add(hp);
+                PpProcess(hb, d, pinned, System.IO.Path.GetDirectoryName(hp), false, depth+1, incDirs, seen); seen.Remove(hp); }
+            }
+          } else { if(!emit) blank=true; }
+        }
+        if(collect && blank) for(int p=ls;p<le;p++) b[p]=' ';
+        if(le>=n) break; ls=le+1;
+      }
+    }
+    public static List<Row> AnalyzeResolve(string path, Dictionary<string,string> defs, HashSet<string> pinned, string[] incDirs){
+      string src; try{ src=System.IO.File.ReadAllText(path); }catch{ return new List<Row>(); }
+      char[] b = StripComments(src).ToCharArray();
+      var d = new Dictionary<string,string>(defs);
+      string baseDir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path));
+      var seen = new HashSet<string>(); seen.Add(System.IO.Path.GetFullPath(path));
+      PpProcess(b, d, pinned, baseDir, true, 0, incDirs, seen);
+      string outc = Strip(new string(b));   // 走査前に文字列を空白化 (コメントは除去済み)
+      return Scan(path, outc);
+    }
   }
 }
 '@
     try {
         Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-        $script:FiNativeType = [FuncInspectorNativeV5.Engine]
+        $script:FiNativeType = [FuncInspectorNativeV6.Engine]
         return $true
     }
     catch { Write-Verbose "FiNative コンパイル失敗 (純PSにフォールバック): $_"; return $false }
@@ -535,6 +602,77 @@ function Invoke-FiPreprocess {
         }
     }
     return ($out -join "`n")
+}
+
+# --- include 追従 (純PSフォールバック) ---
+function Remove-FICommentsOnly([string]$Src) {
+    $n = $Src.Length; $sb = New-Object System.Text.StringBuilder $n; $i = 0
+    while ($i -lt $n) {
+        $c = $Src[$i]
+        if ($c -eq '/' -and ($i + 1) -lt $n -and $Src[$i + 1] -eq '/') { while ($i -lt $n -and $Src[$i] -ne "`n") { [void]$sb.Append(' '); $i++ } }
+        elseif ($c -eq '/' -and ($i + 1) -lt $n -and $Src[$i + 1] -eq '*') {
+            [void]$sb.Append('  '); $i += 2
+            while ($i -lt $n -and -not ($Src[$i] -eq '*' -and ($i + 1) -lt $n -and $Src[$i + 1] -eq '/')) { if ($Src[$i] -eq "`n") { [void]$sb.Append("`n") } else { [void]$sb.Append(' ') }; $i++ }
+            if ($i -lt $n) { [void]$sb.Append('  '); $i += 2 }
+        }
+        elseif ($c -eq '"' -or $c -eq "'") {
+            $q = $c; [void]$sb.Append($c); $i++
+            while ($i -lt $n -and $Src[$i] -ne $q) { if ($Src[$i] -eq '\' -and ($i + 1) -lt $n) { [void]$sb.Append($Src[$i]); [void]$sb.Append($Src[$i + 1]); $i += 2 } else { [void]$sb.Append($Src[$i]); $i++ } }
+            if ($i -lt $n) { [void]$sb.Append($Src[$i]); $i++ }
+        }
+        else { [void]$sb.Append($c); $i++ }
+    }
+    return $sb.ToString()
+}
+function Resolve-FiInclude([string]$Name, [string]$BaseDir, [string[]]$IncludeDirs) {
+    try { $cand = [IO.Path]::Combine($BaseDir, $Name); if ([IO.File]::Exists($cand)) { return [IO.Path]::GetFullPath($cand) } } catch {}
+    foreach ($d in ($IncludeDirs | Where-Object { $_ })) { try { $cand = [IO.Path]::Combine($d, $Name); if ([IO.File]::Exists($cand)) { return [IO.Path]::GetFullPath($cand) } } catch {} }
+    return $null
+}
+function Invoke-FiPpProcess([string]$Clean, [hashtable]$Defines, [hashtable]$Pinned, [string]$BaseDir, [bool]$Collect, [int]$Depth, [string[]]$IncludeDirs, [hashtable]$Seen, $Out) {
+    $stack = New-Object System.Collections.Generic.List[object]
+    foreach ($line in ($Clean -split "`n")) {
+        $m = $script:FiRxDir.Match($line)
+        if ($m.Success) {
+            $kind = $m.Groups[1].Value; $rest = $m.Groups[2].Value.Trim()
+            switch ($kind) {
+                'ifdef' { $parent = Test-FiEmitting $stack; $idm = $script:FiRxId.Match($rest); $cond = $idm.Success -and $Defines.ContainsKey($idm.Value); $stack.Add(@{ parent = $parent; taken = ($parent -and $cond); active = ($parent -and $cond) }) }
+                'ifndef' { $parent = Test-FiEmitting $stack; $idm = $script:FiRxId.Match($rest); $cond = (-not $idm.Success) -or (-not $Defines.ContainsKey($idm.Value)); $stack.Add(@{ parent = $parent; taken = ($parent -and $cond); active = ($parent -and $cond) }) }
+                'if' { $parent = Test-FiEmitting $stack; $cond = if ($parent) { Get-FiIfValue $rest $Defines } else { $false }; $stack.Add(@{ parent = $parent; taken = ($parent -and $cond); active = ($parent -and $cond) }) }
+                'elif' { if ($stack.Count) { $f = $stack[$stack.Count - 1]; if ($f.parent -and -not $f.taken) { $cond = Get-FiIfValue $rest $Defines; $f.active = $cond; $f.taken = ($f.taken -or $cond) } else { $f.active = $false } } }
+                'else' { if ($stack.Count) { $f = $stack[$stack.Count - 1]; if ($f.parent -and -not $f.taken) { $f.active = $true; $f.taken = $true } else { $f.active = $false } } }
+                'endif' { if ($stack.Count) { $stack.RemoveAt($stack.Count - 1) } }
+                'define' { if (Test-FiEmitting $stack) { $idm = $script:FiRxId.Match($rest); if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value)) { $after = $rest.Substring($idm.Index + $idm.Length).Trim(); if ($after -eq '') { $after = '1' }; $Defines[$idm.Value] = $after } } }
+                'undef' { if (Test-FiEmitting $stack) { $idm = $script:FiRxId.Match($rest); if ($idm.Success -and -not $Pinned.ContainsKey($idm.Value) -and $Defines.ContainsKey($idm.Value)) { $Defines.Remove($idm.Value) } } }
+            }
+            if ($Collect) { [void]$Out.Add('') }
+        }
+        else {
+            $emit = Test-FiEmitting $stack
+            $im = if ($emit -and $Depth -lt 40) { $script:FiRxInc.Match($line) } else { $null }
+            if ($im -and $im.Success) {
+                if ($Collect) { [void]$Out.Add('') }
+                $hp = Resolve-FiInclude $im.Groups[1].Value $BaseDir $IncludeDirs
+                if ($hp -and -not $Seen.ContainsKey($hp)) {
+                    try { $hsrc = [IO.File]::ReadAllText($hp) } catch { $hsrc = $null }
+                    if ($null -ne $hsrc) { $hc = Remove-FICommentsOnly $hsrc; $Seen[$hp] = $true; Invoke-FiPpProcess $hc $Defines $Pinned ([IO.Path]::GetDirectoryName($hp)) $false ($Depth + 1) $IncludeDirs $Seen $null; $Seen.Remove($hp) }
+                }
+            }
+            else {
+                if ($Collect) { if ($emit) { [void]$Out.Add($line) } else { [void]$Out.Add('') } }
+            }
+        }
+    }
+}
+function Invoke-FiResolve([string]$FilePath, [hashtable]$Defines, [hashtable]$Pinned, [string[]]$IncludeDirs) {
+    try { $src = [IO.File]::ReadAllText($FilePath) } catch { return '' }
+    $cc = Remove-FICommentsOnly $src
+    $d = if ($Defines) { $Defines.Clone() } else { @{} }
+    $base = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($FilePath))
+    $seen = @{}; $seen[[IO.Path]::GetFullPath($FilePath)] = $true
+    $out = New-Object System.Collections.Generic.List[string]
+    Invoke-FiPpProcess $cc $d $Pinned $base $true 0 $IncludeDirs $seen $out
+    return (Remove-FICommentsStrings ($out -join "`n"))
 }
 
 function Get-FiTokVal($t) {
@@ -741,7 +879,9 @@ function Find-CFunctions {
         [hashtable]$Defines,
         [string[]]$Pinned,
         [switch]$IgnoreSwitches,
-        [switch]$External
+        [switch]$External,
+        [switch]$Resolve,
+        [string[]]$IncludeDirs
     )
     try { $src = [System.IO.File]::ReadAllText($FilePath) }
     catch { Write-Warning "読み込み失敗: $FilePath"; return @() }
@@ -751,9 +891,19 @@ function Find-CFunctions {
         if ($Defines) { foreach ($k in $Defines.Keys) { $nd[[string]$k] = [string]$Defines[$k] } }
         $np = New-Object 'System.Collections.Generic.HashSet[string]'
         foreach ($p in ($Pinned | Where-Object { $_ })) { [void]$np.Add([string]$p) }
+        if ($Resolve -and -not $IgnoreSwitches) {
+            return $script:FiNativeType::AnalyzeResolve($FilePath, $nd, $np, [string[]]($IncludeDirs))
+        }
         return $script:FiNativeType::Analyze($FilePath, $src, $nd, [bool]$IgnoreSwitches, $np, [bool]$External)
     }
 
+    # --- 純 PowerShell フォールバック ---
+    if ($Resolve -and -not $IgnoreSwitches) {
+        $pin = @{}
+        foreach ($p in ($Pinned | Where-Object { $_ })) { $pin[[string]$p] = $true }
+        $clean = Invoke-FiResolve $FilePath ($Defines) $pin $IncludeDirs
+        return Get-FiScan $FilePath $clean
+    }
     $clean = Remove-FICommentsStrings $src
     if (-not $IgnoreSwitches) {
         $d = if ($Defines) { $Defines.Clone() } else { @{} }
@@ -815,6 +965,16 @@ function Show-FuncInspectorGui {
     $cbIgnore = New-Object System.Windows.Forms.CheckBox
     $cbIgnore.Text = '全コード有効(スイッチ無視)'; $cbIgnore.Location = '260,46'; $cbIgnore.AutoSize = $true
     $form.Controls.Add($cbIgnore)
+    # include 解決 (スイッチ追跡/重い)。別ファイルの #define まで反映。
+    $cbResolve = New-Object System.Windows.Forms.CheckBox
+    $cbResolve.Text = 'include解決(重い)'; $cbResolve.Location = '440,46'; $cbResolve.AutoSize = $true
+    $form.Controls.Add($cbResolve)
+    $lblInc = New-Object System.Windows.Forms.Label
+    $lblInc.Text = '-I:'; $lblInc.Location = '565,48'; $lblInc.AutoSize = $true
+    $form.Controls.Add($lblInc)
+    $tbInc = New-Object System.Windows.Forms.TextBox
+    $tbInc.Location = '590,45'; $tbInc.Size = '300,22'; $tbInc.Anchor = 'Top,Left,Right'
+    $form.Controls.Add($tbInc)
 
     # --- スイッチ ペイン (左) ---
     $lblSw = New-Object System.Windows.Forms.Label
@@ -911,7 +1071,7 @@ function Show-FuncInspectorGui {
 
     # バックグラウンド実行用スクリプト
     $sbScan = {
-        param($sync, $corePath, $pathArg, $exts, $defines, $ignore, $external)
+        param($sync, $corePath, $pathArg, $exts, $defines, $ignore, $external, $resolve, $incdirs)
         try {
             . $corePath
             $files = Get-FITargetFiles -Paths @($pathArg) -Exts $exts
@@ -921,7 +1081,7 @@ function Show-FuncInspectorGui {
             $pinned = [string[]]$defines.Keys
             foreach ($f in $files) {
                 $i++; $sync.Progress = $i; $sync.Current = $f
-                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore -External:$external)) { $rows.Add($r) }
+                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore -External:$external -Resolve:$resolve -IncludeDirs $incdirs)) { $rows.Add($r) }
             }
             $sync.Result = $rows
         } catch { $sync.Error = $_.Exception.Message }
@@ -976,8 +1136,10 @@ function Show-FuncInspectorGui {
                     $defines[$nm] = $val
                 }
             }
-            # GUI は常に「選択スイッチのみ有効」(external=$true)。ソース内 #define は無視。
-            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument($true)
+            $resolve = [bool]$cbResolve.Checked
+            $incdirs = @($tbInc.Text.Split(@(';', ','), [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            # include 解決時は cpp 準拠 (external は使わない)。非解決時は選択スイッチのみ有効。
+            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument(-not $resolve).AddArgument($resolve).AddArgument($incdirs)
         }
         $script:FiPS = $ps; $script:FiRS = $rs; $script:FiHandle = $ps.BeginInvoke()
         $timer.Start()
@@ -1111,6 +1273,8 @@ function Invoke-FuncInspector {
         [Alias('U')][string[]]$Undef,
         [switch]$IgnoreSwitches,
         [switch]$ExternalSwitches,
+        [switch]$ResolveIncludes,
+        [Alias('I')][string[]]$IncludeDirs,
         [switch]$AsObject
     )
 
@@ -1151,7 +1315,7 @@ function Invoke-FuncInspector {
     foreach ($f in $files) {
         $i++
         Write-Progress -Activity 'FuncInspector' -Status ("解析 {0}/{1} {2}" -f $i, $total, $f) -PercentComplete ($(if ($total) { $i * 100 / $total } else { 100 }))
-        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned.ToArray() -IgnoreSwitches:$IgnoreSwitches -External:$ExternalSwitches)) { $rows.Add($r) }
+        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned.ToArray() -IgnoreSwitches:$IgnoreSwitches -External:$ExternalSwitches -Resolve:$ResolveIncludes -IncludeDirs $IncludeDirs)) { $rows.Add($r) }
     }
     Write-Progress -Activity 'FuncInspector' -Completed
     if ($AsObject) { return $rows }

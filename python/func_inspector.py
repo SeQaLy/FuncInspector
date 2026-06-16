@@ -47,6 +47,8 @@ KEYWORDS = {
 
 _DIRECTIVE = re.compile(r'^\s*#\s*(ifdef|ifndef|if|elif|else|endif|define|undef)\b(.*)$')
 _IDENT = re.compile(r'[A-Za-z_]\w*')
+_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"')   # プロジェクト include ("...") のみ
+MAX_INCLUDE_DEPTH = 40
 
 
 # --------------------------------------------------------------------------
@@ -85,6 +87,44 @@ def strip_comments_strings(src: str) -> str:
             if i < n:
                 out.append(' ')
                 i += 1
+        else:
+            out.append(c)
+            i += 1
+    return ''.join(out)
+
+
+def strip_comments(src: str) -> str:
+    """コメントだけを空白化し、文字列リテラルはそのまま残す。
+    `#include "x.h"` のターゲットを保持するために使う (include 追従モード用)。
+    """
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '/' and i + 1 < n and src[i + 1] == '/':
+            while i < n and src[i] != '\n':
+                out.append(' ')
+                i += 1
+        elif c == '/' and i + 1 < n and src[i + 1] == '*':
+            out.append('  ')
+            i += 2
+            while i < n and not (src[i] == '*' and i + 1 < n and src[i + 1] == '/'):
+                out.append('\n' if src[i] == '\n' else ' ')
+                i += 1
+            if i < n:
+                out.append('  ')
+                i += 2
+        elif c == '"' or c == "'":
+            quote = c
+            out.append(c)
+            i += 1
+            while i < n and src[i] != quote:
+                if src[i] == '\\' and i + 1 < n:
+                    out.append(src[i]); out.append(src[i + 1]); i += 2
+                else:
+                    out.append(src[i]); i += 1
+            if i < n:
+                out.append(src[i]); i += 1
         else:
             out.append(c)
             i += 1
@@ -431,6 +471,99 @@ def preprocess(clean: str, defines: dict, pinned=None, external=False, value_con
 
 
 # --------------------------------------------------------------------------
+# include 追従プリプロセス (スイッチ追跡モード)
+# --------------------------------------------------------------------------
+def _resolve_include(name, base_dir, inc_dirs):
+    """`#include "name"` を解決。まずインクルード元ディレクトリ、次に -I 群。"""
+    cand = os.path.join(base_dir, name)
+    if os.path.isfile(cand):
+        return os.path.abspath(cand)
+    for d in inc_dirs:
+        cand = os.path.join(d, name)
+        if os.path.isfile(cand):
+            return os.path.abspath(cand)
+    return None
+
+
+def _pp_run(clean, defines, pinned, base_dir, inc_dirs, collect, depth, seen):
+    """条件コンパイルを評価しつつ、有効な `#include "..."` を実際にたどって
+    defines を順に更新する。collect=True (対象 .c) のときは無効行を空行化した
+    行リストを返す。ヘッダ処理 (collect=False) は副作用 (defines 更新) のみ。
+    """
+    out = [] if collect else None
+    stack = []
+
+    def emitting():
+        for f in stack:
+            if not f['active']:
+                return False
+        return True
+
+    for line in clean.split('\n'):
+        m = _DIRECTIVE.match(line)
+        if m:
+            kind, rest = m.group(1), m.group(2).strip()
+            if kind == 'ifdef':
+                parent = emitting(); mm = _IDENT.search(rest)
+                cond = bool(mm) and (mm.group(0) in defines)
+                stack.append({'parent': parent, 'taken': parent and cond, 'active': parent and cond})
+            elif kind == 'ifndef':
+                parent = emitting(); mm = _IDENT.search(rest)
+                cond = (not mm) or (mm.group(0) not in defines)
+                stack.append({'parent': parent, 'taken': parent and cond, 'active': parent and cond})
+            elif kind == 'if':
+                parent = emitting()
+                cond = bool(_eval_expr(rest, defines)) if parent else False
+                stack.append({'parent': parent, 'taken': parent and cond, 'active': parent and cond})
+            elif kind == 'elif':
+                if stack:
+                    f = stack[-1]
+                    if f['parent'] and not f['taken']:
+                        cond = bool(_eval_expr(rest, defines)); f['active'] = cond; f['taken'] = f['taken'] or cond
+                    else:
+                        f['active'] = False
+            elif kind == 'else':
+                if stack:
+                    f = stack[-1]
+                    if f['parent'] and not f['taken']:
+                        f['active'] = True; f['taken'] = True
+                    else:
+                        f['active'] = False
+            elif kind == 'endif':
+                if stack:
+                    stack.pop()
+            elif kind == 'define':
+                if emitting():
+                    mm = _IDENT.search(rest)
+                    if mm and mm.group(0) not in pinned:
+                        after = rest[mm.end():].strip()
+                        defines[mm.group(0)] = after if after else '1'
+            elif kind == 'undef':
+                if emitting():
+                    mm = _IDENT.search(rest)
+                    if mm and mm.group(0) not in pinned and mm.group(0) in defines:
+                        del defines[mm.group(0)]
+            if collect:
+                out.append('')
+        else:
+            inc = _INCLUDE.match(line)
+            if inc and emitting() and depth < MAX_INCLUDE_DEPTH:
+                p = _resolve_include(inc.group(1), base_dir, inc_dirs)
+                if p and p not in seen:
+                    hsrc = _read(p)
+                    if hsrc is not None:
+                        hclean = strip_comments(hsrc)   # コメントのみ除去 (include 文字列を残す)
+                        _pp_run(hclean, defines, pinned, os.path.dirname(p), inc_dirs,
+                                False, depth + 1, seen | {p})
+                if collect:
+                    out.append('')   # include 行は空行化
+            else:
+                if collect:
+                    out.append(line if emitting() else '')
+    return out
+
+
+# --------------------------------------------------------------------------
 # 関数検出 + ステップ数
 # --------------------------------------------------------------------------
 def _is_ident_start(c): return c.isalpha() or c == '_'
@@ -586,22 +719,33 @@ def _read(path):
         return None
 
 
-def analyze_file(path, defines=None, pinned=None, external=False):
+def analyze_file(path, defines=None, pinned=None, external=False, resolve=False, inc_dirs=None):
     src = _read(path)
     if src is None:
         return []
-    return [(path, line, name, steps)
-            for (line, name, steps) in find_functions(src, defines, pinned, external)]
+    if resolve:
+        # スイッチ追跡モード: include をたどってマクロを解決してから関数を走査。
+        # include ターゲット ("x.h") を残すためコメントのみ除去 → 走査前に文字列も除去。
+        cc = strip_comments(src)
+        d = dict(defines) if defines else {}
+        base = os.path.dirname(os.path.abspath(path))
+        out = _pp_run(cc, d, pinned or set(), base, inc_dirs or [], True, 0,
+                      {os.path.abspath(path)})
+        rows = _scan(strip_comments_strings('\n'.join(out)))
+    else:
+        rows = find_functions(src, defines, pinned, external)
+    return [(path, line, name, steps) for (line, name, steps) in rows]
 
 
-def analyze_paths(paths, exts, defines=None, pinned=None, external=False, progress=None):
+def analyze_paths(paths, exts, defines=None, pinned=None, external=False,
+                  resolve=False, inc_dirs=None, progress=None):
     files = gather_files(paths, exts)
     total = len(files)
     rows = []
     for idx, fp in enumerate(files, 1):
         if progress:
             progress(idx, total, fp)
-        rows.extend(analyze_file(fp, defines, pinned, external))
+        rows.extend(analyze_file(fp, defines, pinned, external, resolve, inc_dirs))
     return rows
 
 
@@ -962,6 +1106,12 @@ def main(argv=None):
     parser.add_argument("--external-switches", action="store_true",
                         help="ソース内の #define/#undef を無視し、スイッチは -D 選択のみで決める"
                              " (選択した時だけ #if ブロックを有効化)")
+    parser.add_argument("--resolve-includes", action="store_true",
+                        help="[スイッチ追跡モード/重い] プロジェクト include (\"...\") を"
+                             "たどってマクロを解決してから関数を判定する (別ファイルの"
+                             " #define を反映)。<...> システムヘッダは追わない")
+    parser.add_argument("-I", dest="incdir", action="append", metavar="DIR",
+                        help="include 検索パス (--resolve-includes 用。複数指定可)")
     args = parser.parse_args(argv)
 
     if args.gui or not args.paths:
@@ -990,8 +1140,10 @@ def main(argv=None):
 
     # 関数抽出モード
     use_defines = None if args.ignore_switches else defines
+    use_resolve = args.resolve_includes and not args.ignore_switches
     rows = analyze_paths(args.paths, exts, use_defines, pinned,
-                         args.external_switches, progress=_cli_progress)
+                         args.external_switches, use_resolve,
+                         args.incdir or [], progress=_cli_progress)
     _cli_progress_done()
     lines = []
     if not args.no_header:

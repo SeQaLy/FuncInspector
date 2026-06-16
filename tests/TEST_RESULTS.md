@@ -2,7 +2,7 @@
 
 `python tests/run_tests.py` で再実行できます。各テストは **期待値(アンカー)** と **3実装の相互一致** の両方を検証します。
 
-- 実行日時: 2026-06-17 01:28:32
+- 実行日時: 2026-06-17 02:03:42
 - 検証した実装: Python, C, PowerShell
 - C: gcc でビルドして検証
 - PowerShell: `pwsh.EXE` で検証
@@ -28,6 +28,8 @@
 | `ext-none` | --external-switches 未選択: 内蔵 #define を無視 -> always のみ | PASS | PASS | PASS | ✅ |
 | `ext-1` | --external-switches -D TOOL_TEST=1: t1 が出る | PASS | PASS | PASS | ✅ |
 | `ext-2` | --external-switches -D TOOL_TEST=2: t2 が出る (==1 は出ない) | PASS | PASS | PASS | ✅ |
+| `inc-light` | 軽量(include解決なし): inccfg.h を読まないので TOOL_TEST 未定義 → inc_always のみ | PASS | PASS | PASS | ✅ |
+| `inc-resolve` | --resolve-includes: inccfg.h の TOOL_TEST=1 を反映 → inc_t1, inc_always | PASS | PASS | PASS | ✅ |
 | `edge-known` | 既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し | PASS | PASS | PASS | ✅ |
 
 ## テストデータと結果の詳細
@@ -172,6 +174,24 @@
 - 実際の検出: L15 t2 (steps=1); L18 always (steps=1)
 - 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
 
+### inc-light — incmain.c
+
+- 説明: 軽量(include解決なし): inccfg.h を読まないので TOOL_TEST 未定義 → inc_always のみ
+- モード: 関数抽出  オプション: (なし)
+- 期待: 1件 → inc_always(steps=1)
+- 非検出を期待: inc_t1, inc_t2
+- 実際の検出: L13 inc_always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### inc-resolve — incmain.c
+
+- 説明: --resolve-includes: inccfg.h の TOOL_TEST=1 を反映 → inc_t1, inc_always
+- モード: 関数抽出  オプション: (なし)
+- 期待: 2件 → inc_t1(steps=1), inc_always(steps=1)
+- 非検出を期待: inc_t2
+- 実際の検出: L8 inc_t1 (steps=1); L13 inc_always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
 ### edge-known — edge.c
 
 - 説明: 既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し
@@ -274,6 +294,24 @@ int t2(void) { return 2; }
 #endif
 
 void always(void) { go(); }
+```
+
+### tests/cases/incmain.c
+
+```c
+/* incmain.c - 別ファイル(inccfg.h)の #define を include 追従で解決するテスト
+ *   軽量(既定/include解決なし) : inccfg.h を読まない → TOOL_TEST 未定義 → inc_always のみ
+ *   --resolve-includes          : inccfg.h を読む → TOOL_TEST=1 → inc_t1, inc_always
+ */
+#include "inccfg.h"
+
+#if TOOL_TEST == 1
+int inc_t1(void) { return 0; }
+#elif TOOL_TEST == 2
+int inc_t2(void) { return 0; }
+#endif
+
+void inc_always(void) { go(); }
 ```
 
 ### tests/cases/pinned.c

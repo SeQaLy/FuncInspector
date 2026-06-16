@@ -49,7 +49,9 @@ param(
     [Alias('D')][string[]]$Define,
     [Alias('U')][string[]]$Undef,
     [switch]$IgnoreSwitches,
-    [switch]$ExternalSwitches
+    [switch]$ExternalSwitches,
+    [switch]$ResolveIncludes,
+    [Alias('I')][string[]]$IncludeDirs
 )
 
 # 本体ロジックを読み込む
@@ -62,7 +64,7 @@ if (-not (Test-Path -LiteralPath $core)) {
 
 # パラメータをそのまま委譲
 $fwd = @{}
-foreach ($k in 'Path', 'Out', 'Extensions', 'NoHeader', 'Gui', 'ListSwitches', 'Define', 'Undef', 'IgnoreSwitches', 'ExternalSwitches') {
+foreach ($k in 'Path', 'Out', 'Extensions', 'NoHeader', 'Gui', 'ListSwitches', 'Define', 'Undef', 'IgnoreSwitches', 'ExternalSwitches', 'ResolveIncludes', 'IncludeDirs') {
     if ($PSBoundParameters.ContainsKey($k)) { $fwd[$k] = $PSBoundParameters[$k] }
 }
 Invoke-FuncInspector @fwd

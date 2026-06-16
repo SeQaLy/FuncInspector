@@ -39,6 +39,18 @@ switch,occurrences,state,filepath,line
   `TOOL_TEST(0) == CFG_A(0)` で `0==0` が成立して関数が誤って出てしまう、という事故を防ぎます
   (`CFG_A=100` を尊重 → `0==100` で偽)。
 
+## 用途で切り分ける2モード
+
+| | 関数一覧モード (既定・軽量) | スイッチ追跡モード (`--resolve-includes`・重い) |
+|---|---|---|
+| 想定ユーザー | 「とにかく関数の一覧が欲しい」 | 「どのスイッチでどの関数が有効かを正確に追いたい」 |
+| `#include "..."` | **たどらない**(各ファイル単体で解析) | **たどる**(プロジェクト include を解決し別ファイルの `#define` も反映) |
+| 速度 | 速い | ヘッダ処理ぶん遅い (`-I` とファイル相対で `"..."` のみ解決。`<...>` は追わない) |
+| 例 | `config.h` の `TOOL_TEST 1` は見えない | `config.h` を読んで `#if TOOL_TEST==1` を正しく判定 |
+
+スイッチ追跡モードは cpp 準拠（ソース内＋ヘッダの `#define` を順に反映、`-D`/`-U` は優先）。
+`-I DIR` で include 検索パスを追加できます（`"..."` はまずインクルード元ディレクトリ、次に `-I` 群）。
+
 ## 特徴
 
 - **`WINAMS` などのマクロ対応**: `void WINAMS startup(void)` のように呼び出し規約
@@ -105,7 +117,7 @@ python python/func_inspector.py --gui
 ```
 
 オプション: `--out/-o 出力先` `--ext 拡張子` `--no-header` `--gui`
-`--list-switches` `-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches`
+`--list-switches` `-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `--resolve-includes` `-I DIR`
 
 ## 2. PowerShell 版 (`powershell/FuncInspector.ps1`)
 
@@ -128,7 +140,7 @@ GUI は Windows Forms を使用します (Windows 環境)。
 ```
 
 オプション: `-Out` `-Extensions` `-NoHeader` `-Gui` `-ListSwitches`
-`-D/-Define NAME[,NAME=VAL]` `-U/-Undef NAME` `-IgnoreSwitches` `-ExternalSwitches`
+`-D/-Define NAME[,NAME=VAL]` `-U/-Undef NAME` `-IgnoreSwitches` `-ExternalSwitches` `-ResolveIncludes` `-I/-IncludeDirs DIR`
 
 実行ポリシーで止まる場合:
 `powershell -ExecutionPolicy Bypass -File .\powershell\FuncInspector.ps1 -Gui`
@@ -179,7 +191,7 @@ cl  /O2 c/func_inspector.c                          # MSVC (Windows)
 ```
 
 オプション: `--out 出力先` `--ext 拡張子` `--no-header` `--list-switches`
-`-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `-h/--help`
+`-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `--resolve-includes` `-I DIR` `-h/--help`
 
 ## 検出ロジック
 
