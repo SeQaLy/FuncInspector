@@ -788,22 +788,11 @@ function Show-FuncInspectorGui {
     $cbIgnore.Text = '全コード有効(スイッチ無視)'; $cbIgnore.Location = '560,46'; $cbIgnore.AutoSize = $true
     $form.Controls.Add($cbIgnore)
 
-    $lblXd = New-Object System.Windows.Forms.Label
-    $lblXd.Text = '追加 -D:'; $lblXd.Location = '10,72'; $lblXd.AutoSize = $true
-    $form.Controls.Add($lblXd)
-    $tbXd = New-Object System.Windows.Forms.TextBox
-    $tbXd.Location = '120,69'; $tbXd.Size = '300,24'; $tbXd.Anchor = 'Top,Left'
-    $tbXd.Text = ''
-    $form.Controls.Add($tbXd)
-    $lblXdHint = New-Object System.Windows.Forms.Label
-    $lblXdHint.Text = '(値指定。例 TOOL_TEST=2,FOO)'; $lblXdHint.Location = '430,72'; $lblXdHint.AutoSize = $true
-    $form.Controls.Add($lblXdHint)
-
     $lblSw = New-Object System.Windows.Forms.Label
-    $lblSw.Text = 'スイッチ (ON=有効 / 値はプルダウン / 初出をダブルクリックで開く)'; $lblSw.Location = '10,100'; $lblSw.AutoSize = $true
+    $lblSw.Text = 'スイッチ (ON=有効 / 値はプルダウン / 初出をダブルクリックで開く)'; $lblSw.Location = '10,80'; $lblSw.AutoSize = $true
     $form.Controls.Add($lblSw)
     $swlv = New-Object System.Windows.Forms.DataGridView
-    $swlv.Location = '10,120'; $swlv.Size = '300,410'; $swlv.Anchor = 'Top,Bottom,Left'
+    $swlv.Location = '10,100'; $swlv.Size = '300,430'; $swlv.Anchor = 'Top,Bottom,Left'
     $swlv.AllowUserToAddRows = $false; $swlv.AllowUserToDeleteRows = $false
     $swlv.RowHeadersVisible = $false; $swlv.AutoSizeColumnsMode = 'None'
     $swlv.SelectionMode = 'CellSelect'; $swlv.EditMode = 'EditOnEnter'
@@ -832,13 +821,13 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($swlv)
 
     $btnDetect = New-Object System.Windows.Forms.Button
-    $btnDetect.Text = 'スイッチ検出'; $btnDetect.Location = '10,535'; $btnDetect.Size = '270,26'; $btnDetect.Anchor = 'Bottom,Left'
+    $btnDetect.Text = 'スイッチ検出'; $btnDetect.Location = '10,535'; $btnDetect.Size = '300,26'; $btnDetect.Anchor = 'Bottom,Left'
     $form.Controls.Add($btnDetect)
 
     $lv = New-Object System.Windows.Forms.ListView
-    $lv.Location = '290,120'; $lv.Size = '600,410'; $lv.Anchor = 'Top,Bottom,Left,Right'
+    $lv.Location = '322,100'; $lv.Size = '572,430'; $lv.Anchor = 'Top,Bottom,Left,Right'
     $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $true
-    [void]$lv.Columns.Add('File', 330)
+    [void]$lv.Columns.Add('File', 300)
     [void]$lv.Columns.Add('Line', 55)
     [void]$lv.Columns.Add('Function', 150)
     [void]$lv.Columns.Add('Steps', 55)
@@ -848,14 +837,14 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($lv)
 
     $pb = New-Object System.Windows.Forms.ProgressBar
-    $pb.Location = '290,538'; $pb.Size = '360,18'; $pb.Anchor = 'Bottom,Left'; $pb.Minimum = 0; $pb.Maximum = 1
+    $pb.Location = '322,540'; $pb.Size = '330,18'; $pb.Anchor = 'Bottom,Left'; $pb.Minimum = 0; $pb.Maximum = 1
     $form.Controls.Add($pb)
     $status = New-Object System.Windows.Forms.Label
-    $status.Location = '290,560'; $status.Size = '520,20'; $status.Text = '準備完了'; $status.Anchor = 'Bottom,Left'
+    $status.Location = '322,565'; $status.Size = '470,20'; $status.Text = '準備完了'; $status.Anchor = 'Bottom,Left'
     $form.Controls.Add($status)
 
     $btnScan = New-Object System.Windows.Forms.Button
-    $btnScan.Text = 'スキャン'; $btnScan.Location = '670,535'; $btnScan.Size = '95,28'; $btnScan.Anchor = 'Bottom,Right'
+    $btnScan.Text = 'スキャン'; $btnScan.Location = '672,535'; $btnScan.Size = '95,28'; $btnScan.Anchor = 'Bottom,Right'
     $form.Controls.Add($btnScan)
     $btnSave = New-Object System.Windows.Forms.Button
     $btnSave.Text = 'CSV 保存'; $btnSave.Location = '775,535'; $btnSave.Size = '100,28'; $btnSave.Anchor = 'Bottom,Right'
@@ -931,11 +920,6 @@ function Show-FuncInspectorGui {
                     $defines[$nm] = $val
                 }
             }
-            # 追加 -D (値指定。例: TOOL_TEST=2,FOO)
-            foreach ($tok in ($tbXd.Text.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
-                if ($tok.Contains('=')) { $kv = $tok.Split('=', 2); $defines[$kv[0].Trim()] = $kv[1] }
-                else { $defines[$tok] = '1' }
-            }
             [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument([bool]$cbExternal.Checked)
         }
         $script:FiPS = $ps; $script:FiRS = $rs; $script:FiHandle = $ps.BeginInvoke()
@@ -971,6 +955,12 @@ function Show-FuncInspectorGui {
                         $cell = $swlv.Rows[$idx].Cells['Val']
                         foreach ($v in $vals) { [void]$cell.Items.Add([string]$v) }
                         $cell.Value = $vals[0]
+                        # 値候補が1つだけ (#ifdef / ブール / ==単一値) はプルダウン不要 → グレーアウト
+                        if ($vals.Count -le 1) {
+                            $cell.ReadOnly = $true
+                            $cell.Style.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
+                            $cell.Style.ForeColor = [System.Drawing.Color]::Gray
+                        }
                         $swlv.Rows[$idx].Tag = $info
                     }
                     $status.Text = ("完了: {0} 個のスイッチ (ON で有効化 / 値はプルダウン)" -f $agg.Count)
