@@ -8,6 +8,10 @@
 result.csv
 *.tmp
 
+# Python
+__pycache__/
+*.pyc
+
 # OS / editor
 .DS_Store
 Thumbs.db
