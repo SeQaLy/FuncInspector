@@ -787,14 +787,31 @@ function Show-FuncInspectorGui {
     $cbIgnore.Text = '全コード有効(スイッチ無視)'; $cbIgnore.Location = '260,46'; $cbIgnore.AutoSize = $true
     $form.Controls.Add($cbIgnore)
 
+    # --- スイッチ ペイン (左) ---
     $lblSw = New-Object System.Windows.Forms.Label
-    $lblSw.Text = 'スイッチ (ON=有効 / 値はプルダウン / 初出をダブルクリックで開く)'; $lblSw.Location = '10,80'; $lblSw.AutoSize = $true
+    $lblSw.Text = 'スイッチ (ON=有効 / 値=プルダウン / 初出をダブルクリックで開く)'; $lblSw.Location = '10,78'; $lblSw.AutoSize = $true
     $form.Controls.Add($lblSw)
+    $lblSwFil = New-Object System.Windows.Forms.Label
+    $lblSwFil.Text = '絞り込み:'; $lblSwFil.Location = '10,101'; $lblSwFil.AutoSize = $true
+    $form.Controls.Add($lblSwFil)
+    $tbSwFilter = New-Object System.Windows.Forms.TextBox
+    $tbSwFilter.Location = '75,98'; $tbSwFilter.Size = '235,22'; $tbSwFilter.Anchor = 'Top,Left'
+    $form.Controls.Add($tbSwFilter)
+
     $swlv = New-Object System.Windows.Forms.DataGridView
-    $swlv.Location = '10,100'; $swlv.Size = '300,430'; $swlv.Anchor = 'Top,Bottom,Left'
-    $swlv.AllowUserToAddRows = $false; $swlv.AllowUserToDeleteRows = $false
+    $swlv.Location = '10,126'; $swlv.Size = '300,404'; $swlv.Anchor = 'Top,Bottom,Left'
+    $swlv.AllowUserToAddRows = $false; $swlv.AllowUserToDeleteRows = $false; $swlv.AllowUserToResizeRows = $false
     $swlv.RowHeadersVisible = $false; $swlv.AutoSizeColumnsMode = 'None'
     $swlv.SelectionMode = 'CellSelect'; $swlv.EditMode = 'EditOnEnter'
+    # 右の一覧と見た目を揃える: 白背景・テーマ準拠ヘッダ・沈みボーダー・薄いグリッド線・青選択
+    $swlv.BackgroundColor = [System.Drawing.Color]::White
+    $swlv.BorderStyle = 'Fixed3D'
+    $swlv.EnableHeadersVisualStyles = $true
+    $swlv.ColumnHeadersHeightSizeMode = 'DisableResizing'; $swlv.ColumnHeadersHeight = 22
+    $swlv.GridColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
+    $swlv.DefaultCellStyle.BackColor = [System.Drawing.Color]::White
+    $swlv.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(51, 153, 255)
+    $swlv.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $colOn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
     $colOn.HeaderText = 'ON'; $colOn.Name = 'On'; $colOn.Width = 34
     $colSw = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
@@ -823,8 +840,19 @@ function Show-FuncInspectorGui {
     $btnDetect.Text = 'スイッチ検出'; $btnDetect.Location = '10,535'; $btnDetect.Size = '300,26'; $btnDetect.Anchor = 'Bottom,Left'
     $form.Controls.Add($btnDetect)
 
+    # --- 関数 ペイン (右) ---
+    $lblFn = New-Object System.Windows.Forms.Label
+    $lblFn.Text = '関数 (ダブルクリックで開く)'; $lblFn.Location = '322,78'; $lblFn.AutoSize = $true
+    $form.Controls.Add($lblFn)
+    $lblFnFil = New-Object System.Windows.Forms.Label
+    $lblFnFil.Text = '絞り込み:'; $lblFnFil.Location = '322,101'; $lblFnFil.AutoSize = $true
+    $form.Controls.Add($lblFnFil)
+    $tbFnFilter = New-Object System.Windows.Forms.TextBox
+    $tbFnFilter.Location = '387,98'; $tbFnFilter.Size = '507,22'; $tbFnFilter.Anchor = 'Top,Left,Right'
+    $form.Controls.Add($tbFnFilter)
+
     $lv = New-Object System.Windows.Forms.ListView
-    $lv.Location = '322,100'; $lv.Size = '572,430'; $lv.Anchor = 'Top,Bottom,Left,Right'
+    $lv.Location = '322,126'; $lv.Size = '572,404'; $lv.Anchor = 'Top,Bottom,Left,Right'
     $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $true
     [void]$lv.Columns.Add('File', 300)
     [void]$lv.Columns.Add('Line', 55)
@@ -926,6 +954,45 @@ function Show-FuncInspectorGui {
         $timer.Start()
     }
 
+    # 関数一覧の絞り込み表示 (File または Function に部分一致)
+    function Update-FnView {
+        $q = $tbFnFilter.Text.Trim()
+        $lv.BeginUpdate()
+        $lv.Items.Clear()
+        $shown = 0; $tot = 0
+        foreach ($r in $script:FIguiRows) {
+            $tot += $r.Steps
+            if ($q) {
+                $f = [string]$r.File; $fn = [string]$r.Function
+                if (($f.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) -and
+                    ($fn.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) { continue }
+            }
+            $it = New-Object System.Windows.Forms.ListViewItem([string]$r.File)
+            [void]$it.SubItems.Add([string]$r.Line)
+            [void]$it.SubItems.Add([string]$r.Function)
+            [void]$it.SubItems.Add([string]$r.Steps)
+            [void]$lv.Items.Add($it)
+            $shown++
+        }
+        $lv.EndUpdate()
+        if ($q) { $status.Text = ("{0}/{1} 関数 (絞り込み '{2}') / 合計 {3} ステップ" -f $shown, $script:FIguiRows.Count, $q, $tot) }
+        else { $status.Text = ("{0} 関数 / 合計 {1} ステップ (ダブルクリックで開く)" -f $script:FIguiRows.Count, $tot) }
+    }
+    # スイッチ表の絞り込み (Switch 名に部分一致)。ON/値の状態は保持 (行の表示を切替)。
+    function Update-SwView {
+        $q = $tbSwFilter.Text.Trim()
+        try { $swlv.EndEdit() } catch {}
+        try { $swlv.CurrentCell = $null } catch {}
+        foreach ($row in $swlv.Rows) {
+            $nm = [string]$row.Cells['Sw'].Value
+            $vis = $true
+            if ($q -and $nm.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { $vis = $false }
+            if ($row.Visible -ne $vis) { $row.Visible = $vis }
+        }
+    }
+    $tbFnFilter.Add_TextChanged({ if ($script:FIguiRows) { Update-FnView } })
+    $tbSwFilter.Add_TextChanged({ Update-SwView })
+
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 100
     $timer.Add_Tick({
@@ -963,21 +1030,12 @@ function Show-FuncInspectorGui {
                         }
                         $swlv.Rows[$idx].Tag = $info
                     }
+                    Update-SwView   # 現在の絞り込みを反映
                     $status.Text = ("完了: {0} 個のスイッチ (ON で有効化 / 値はプルダウン)" -f $agg.Count)
                 }
                 else {
-                    $rows = $s.Result
-                    $script:FIguiRows = $rows
-                    $lv.Items.Clear(); $tot = 0
-                    foreach ($r in $rows) {
-                        $it = New-Object System.Windows.Forms.ListViewItem([string]$r.File)
-                        [void]$it.SubItems.Add([string]$r.Line)
-                        [void]$it.SubItems.Add([string]$r.Function)
-                        [void]$it.SubItems.Add([string]$r.Steps)
-                        [void]$lv.Items.Add($it)
-                        $tot += $r.Steps
-                    }
-                    $status.Text = ("完了: {0} 関数 / 合計 {1} ステップ (ダブルクリックで開く)" -f $rows.Count, $tot)
+                    $script:FIguiRows = $s.Result
+                    Update-FnView   # 現在の絞り込みを反映して一覧表示
                 }
                 $pb.Value = 0
                 $btnScan.Enabled = $true; $btnDetect.Enabled = $true; $btnSave.Enabled = $true
