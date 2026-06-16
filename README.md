@@ -187,7 +187,21 @@ cl  /O2 c/func_inspector.c                          # MSVC (Windows)
 
 ## テスト
 
-`tests/sample.c` で 3 実装とも同一結果になることを確認できます (既定=全スイッチ OFF)。
+テストランナーで 3 実装をまとめて検証できます。**期待値(アンカー)との一致**と
+**3 実装の相互一致**の両方をチェックします (gcc / pwsh が無い実装は自動 SKIP)。
+
+```bash
+python tests/run_tests.py        # 実行 → tests/TEST_RESULTS.md を生成
+```
+
+- 入力: `tests/cases/*.c` (基本・スイッチ・既知の限界の3種)
+- 結果: [tests/TEST_RESULTS.md](tests/TEST_RESULTS.md) にテストデータ・期待値・実際の
+  検出結果・判定が表で出力されます。
+- 検証項目: 通常定義 / `WINAMS` 前置 / 関数ポインタ引数の検出、プロトタイプ・呼び出し・
+  コメント/文字列の除外、スイッチ ON/OFF による増減、スイッチ一覧、そして既知の限界
+  (`DEFINE_HANDLER` 誤検出・属性付き/K&R/関数ポインタ戻りの見逃し) を「現挙動」として固定。
+
+また `tests/sample.c` 単体でも 3 実装が同一結果になることを確認できます (既定=全スイッチ OFF)。
 
 ```
 file,line,function,steps
