@@ -780,6 +780,7 @@ def run_gui():
             return
         try:
             with open(out, 'w', encoding='utf-8', newline='') as f:
+                f.write("filepath,line,funcname,steps\n")
                 for (fp, line, name, steps) in state["rows"]:
                     f.write("%s,%d,%s,%d\n" % (fp, line, name, steps))
             status.set("保存しました: %s" % out)
@@ -838,7 +839,8 @@ def main(argv=None):
     parser.add_argument("--gui", action="store_true", help="GUI を起動")
     parser.add_argument("--out", "-o", help="CSV 出力先 (省略時は標準出力)")
     parser.add_argument("--ext", default=".c,.h", help="対象拡張子 (既定: .c,.h)")
-    parser.add_argument("--header", action="store_true", help="ヘッダ行を付ける")
+    parser.add_argument("--no-header", action="store_true",
+                        help="先頭のヘッダ行を付けない (既定は付ける)")
     parser.add_argument("--list-switches", action="store_true",
                         help="コンパイルスイッチの一覧を出力 (switch,occurrences,state)")
     parser.add_argument("-D", dest="define", action="append", metavar="NAME[=VAL]",
@@ -860,8 +862,8 @@ def main(argv=None):
         agg = switches_in_paths(args.paths, exts, progress=_cli_progress)
         _cli_progress_done()
         lines = []
-        if args.header:
-            lines.append("switch,occurrences,state,file,line")
+        if not args.no_header:
+            lines.append("switch,occurrences,state,filepath,line")
         for name in sorted(agg):
             info = agg[name]
             state = "ON" if name in defines else "OFF"
@@ -877,8 +879,8 @@ def main(argv=None):
     rows = analyze_paths(args.paths, exts, use_defines, progress=_cli_progress)
     _cli_progress_done()
     lines = []
-    if args.header:
-        lines.append("file,line,function,steps")
+    if not args.no_header:
+        lines.append("filepath,line,funcname,steps")
     for (fp, line, name, steps) in rows:
         lines.append("%s,%d,%s,%d" % (fp, line, name, steps))
     text = "\n".join(lines)

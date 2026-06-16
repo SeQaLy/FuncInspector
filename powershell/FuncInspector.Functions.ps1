@@ -890,6 +890,7 @@ function Show-FuncInspectorGui {
             $dlg.Filter = 'CSV|*.csv|All|*.*'; $dlg.DefaultExt = 'csv'
             if ($dlg.ShowDialog() -eq 'OK') {
                 $sb = New-Object System.Text.StringBuilder
+                [void]$sb.AppendLine('filepath,line,funcname,steps')
                 foreach ($r in $script:FIguiRows) { [void]$sb.AppendLine(("{0},{1},{2},{3}" -f $r.File, $r.Line, $r.Function, $r.Steps)) }
                 [System.IO.File]::WriteAllText($dlg.FileName, $sb.ToString(), [System.Text.Encoding]::UTF8)
                 $status.Text = ("保存しました: {0}" -f $dlg.FileName)
@@ -914,7 +915,7 @@ function Invoke-FuncInspector {
         [Parameter(Position = 0, ValueFromPipeline = $true)][string[]]$Path,
         [string]$Out,
         [string[]]$Extensions = @('.c', '.h'),
-        [switch]$Header,
+        [switch]$NoHeader,
         [switch]$Gui,
         [switch]$ListSwitches,
         [Alias('D')][string[]]$Define,
@@ -942,7 +943,7 @@ function Invoke-FuncInspector {
         }
         if ($AsObject) { return $rows }
         $lines = New-Object System.Collections.Generic.List[string]
-        if ($Header) { $lines.Add('switch,occurrences,state,file,line') }
+        if (-not $NoHeader) { $lines.Add('switch,occurrences,state,filepath,line') }
         foreach ($r in $rows) { $lines.Add(("{0},{1},{2},{3},{4}" -f $r.Switch, $r.Occurrences, $r.State, $r.File, $r.Line)) }
         $text = [string]::Join("`r`n", $lines)
         if ($Out) { [System.IO.File]::WriteAllText($Out, $text + "`r`n", [System.Text.Encoding]::UTF8); Write-Host ("{0} に書き出しました" -f $Out) }
@@ -964,7 +965,7 @@ function Invoke-FuncInspector {
     if ($AsObject) { return $rows }
 
     $lines = New-Object System.Collections.Generic.List[string]
-    if ($Header) { $lines.Add('file,line,function,steps') }
+    if (-not $NoHeader) { $lines.Add('filepath,line,funcname,steps') }
     foreach ($r in $rows) { $lines.Add(("{0},{1},{2},{3}" -f $r.File, $r.Line, $r.Function, $r.Steps)) }
     $text = [string]::Join("`r`n", $lines)
     $tot = ($rows | Measure-Object -Property Steps -Sum).Sum

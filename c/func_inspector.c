@@ -106,7 +106,7 @@ static char *_strdup_(const char *s) {
 /* ---- 設定 (グローバル) --------------------------------------------------- */
 static char  g_exts[16][16];
 static int   g_ext_count = 0;
-static int   g_header = 0;
+static int   g_header = 1;   /* 既定でヘッダ行を出力 */
 static int   g_list_switches = 0;
 static int   g_ignore_switches = 0;
 static FILE *g_out = NULL;
@@ -691,9 +691,9 @@ static void usage(const char *prog) {
         "  -U NAME             スイッチを OFF (未定義)\n"
         "  --ignore-switches   条件コンパイルを無視して全コードを対象\n"
         "  --ext .c,.h         対象拡張子 (既定 .c,.h)\n"
-        "  --header            ヘッダ行を付ける\n"
+        "  --no-header         先頭のヘッダ行を付けない (既定は付ける)\n"
         "  --out FILE          出力先 (既定 標準出力)\n"
-        "出力: file,line,funcname,steps\n", prog);
+        "出力: filepath,line,funcname,steps\n", prog);
 }
 
 int main(int argc, char **argv) {
@@ -705,6 +705,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--ext") && i + 1 < argc) extarg = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outfile = argv[++i];
         else if (!strcmp(argv[i], "--header")) g_header = 1;
+        else if (!strcmp(argv[i], "--no-header")) g_header = 0;
         else if (!strcmp(argv[i], "--list-switches")) g_list_switches = 1;
         else if (!strcmp(argv[i], "--ignore-switches")) g_ignore_switches = 1;
         else if (!strcmp(argv[i], "-D") && i + 1 < argc) add_define(argv[++i]);
@@ -730,7 +731,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < npaths; ++i) walk(paths[i], cb_switches, &sw);
         fprintf(stderr, "\r%-70s\r", "");   /* 進捗行をクリア */
         qsort(sw.items, sw.count, sizeof(SwEntry), sw_cmp);
-        if (g_header) fprintf(g_out, "switch,occurrences,state,file,line\n");
+        if (g_header) fprintf(g_out, "switch,occurrences,state,filepath,line\n");
         for (int i = 0; i < sw.count; ++i) {
             fprintf(g_out, "%s,%d,%s,%s,%ld\n", sw.items[i].name, sw.items[i].count,
                     defs_has(&g_defines, sw.items[i].name) ? "ON" : "OFF",
@@ -739,7 +740,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "%d 個のスイッチ\n", sw.count);
         sw_free(&sw);
     } else {
-        if (g_header) fprintf(g_out, "file,line,function,steps\n");
+        if (g_header) fprintf(g_out, "filepath,line,funcname,steps\n");
         for (int i = 0; i < npaths; ++i) walk(paths[i], cb_analyze, NULL);
         fprintf(stderr, "\r%-70s\r", "");   /* 進捗行をクリア */
     }

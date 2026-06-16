@@ -21,7 +21,7 @@
 .PARAMETER Path           解析するフォルダ または ファイル (複数可)。省略時は GUI。
 .PARAMETER Out            CSV 出力先。省略時は標準出力。
 .PARAMETER Extensions     対象拡張子 (既定: .c,.h)。
-.PARAMETER Header         ヘッダ行を付ける。
+.PARAMETER NoHeader       先頭のヘッダ行を付けない (既定は付ける)。
 .PARAMETER Gui            GUI を起動。
 .PARAMETER ListSwitches   コンパイルスイッチの一覧を出力。
 .PARAMETER Define         ON にするスイッチ (-D)。NAME または NAME=VAL。複数可。
@@ -31,7 +31,7 @@
 .EXAMPLE
     .\FuncInspector.ps1 -Path .\src
 .EXAMPLE
-    .\FuncInspector.ps1 -Path .\src -ListSwitches -Header
+    .\FuncInspector.ps1 -Path .\src -ListSwitches
 .EXAMPLE
     .\FuncInspector.ps1 -Path .\src -D CFG_A,VER=2 -Out result.csv
 .EXAMPLE
@@ -42,7 +42,7 @@ param(
     [string[]]$Path,
     [string]$Out,
     [string[]]$Extensions = @('.c', '.h'),
-    [switch]$Header,
+    [switch]$NoHeader,
     [switch]$Gui,
     [switch]$ListSwitches,
     [Alias('D')][string[]]$Define,
@@ -60,7 +60,7 @@ if (-not (Test-Path -LiteralPath $core)) {
 
 # パラメータをそのまま委譲
 $fwd = @{}
-foreach ($k in 'Path', 'Out', 'Extensions', 'Header', 'Gui', 'ListSwitches', 'Define', 'Undef', 'IgnoreSwitches') {
+foreach ($k in 'Path', 'Out', 'Extensions', 'NoHeader', 'Gui', 'ListSwitches', 'Define', 'Undef', 'IgnoreSwitches') {
     if ($PSBoundParameters.ContainsKey($k)) { $fwd[$k] = $PSBoundParameters[$k] }
 }
 Invoke-FuncInspector @fwd

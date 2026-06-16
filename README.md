@@ -5,11 +5,16 @@ C 言語のソースコードから **関数定義** の関数名を抽出する
 
 ## 出力フォーマット
 
+CSV の **先頭行にヘッダ(フォーマット行)が既定で付きます**。抑制するには
+`--no-header` (PowerShell は `-NoHeader`)。
+
 ```
-file.c,line,funcname,steps
+filepath,line,funcname,steps
+src/foo.c,42,do_init,8
+...
 ```
 
-- `file.c` … ファイルパス
+- `filepath` … ファイルパス
 - `line` … 関数名が現れた行番号
 - `funcname` … 関数名
 - `steps` … ステップ数 (本体の実行行数。空行・コメント行・波括弧のみの行は除く)
@@ -17,13 +22,13 @@ file.c,line,funcname,steps
 スイッチ一覧モード (`--list-switches`) の出力:
 
 ```
-switch,occurrences,state,file,line
+switch,occurrences,state,filepath,line
 ```
 
 - `switch` … コンパイルスイッチ名
 - `occurrences` … `#if`/`#ifdef` 系での出現回数
 - `state` … 現在 ON か OFF か (`-D`/`-U` の指定を反映)
-- `file,line` … **最初に登場する箇所** (誤検知かどうかをここで確認できる)
+- `filepath,line` … **最初に登場する箇所** (誤検知かどうかをここで確認できる)
 
 ## 特徴
 
@@ -61,7 +66,7 @@ GUI は標準ライブラリ tkinter を使用します。
 ```bash
 # CUI
 python python/func_inspector.py ./src
-python python/func_inspector.py ./src --out result.csv --header
+python python/func_inspector.py ./src --out result.csv
 python python/func_inspector.py ./src --list-switches        # スイッチ一覧
 python python/func_inspector.py ./src -D CFG_A -D VER=2       # スイッチ ON
 python python/func_inspector.py ./src --ignore-switches       # 条件無視
@@ -71,7 +76,7 @@ python python/func_inspector.py
 python python/func_inspector.py --gui
 ```
 
-オプション: `--out/-o 出力先` `--ext 拡張子` `--header` `--gui`
+オプション: `--out/-o 出力先` `--ext 拡張子` `--no-header` `--gui`
 `--list-switches` `-D NAME[=VAL]` `-U NAME` `--ignore-switches`
 
 ## 2. PowerShell 版 (`powershell/FuncInspector.ps1`)
@@ -85,7 +90,7 @@ GUI は Windows Forms を使用します (Windows 環境)。
 ```powershell
 # CUI
 .\powershell\FuncInspector.ps1 -Path .\src
-.\powershell\FuncInspector.ps1 -Path .\src -Out result.csv -Header
+.\powershell\FuncInspector.ps1 -Path .\src -Out result.csv
 .\powershell\FuncInspector.ps1 -Path .\src -ListSwitches        # スイッチ一覧
 .\powershell\FuncInspector.ps1 -Path .\src -D CFG_A,VER=2        # スイッチ ON
 .\powershell\FuncInspector.ps1 -Path .\src -IgnoreSwitches       # 条件無視
@@ -94,7 +99,7 @@ GUI は Windows Forms を使用します (Windows 環境)。
 .\powershell\FuncInspector.ps1 -Gui
 ```
 
-オプション: `-Out` `-Extensions` `-Header` `-Gui` `-ListSwitches`
+オプション: `-Out` `-Extensions` `-NoHeader` `-Gui` `-ListSwitches`
 `-D/-Define NAME[,NAME=VAL]` `-U/-Undef NAME` `-IgnoreSwitches`
 
 実行ポリシーで止まる場合:
@@ -145,7 +150,7 @@ cl  /O2 c/func_inspector.c                          # MSVC (Windows)
 ./func_inspector ./src --ignore-switches            # 条件無視
 ```
 
-オプション: `--out 出力先` `--ext 拡張子` `--header` `--list-switches`
+オプション: `--out 出力先` `--ext 拡張子` `--no-header` `--list-switches`
 `-D NAME[=VAL]` `-U NAME` `--ignore-switches` `-h/--help`
 
 ## 検出ロジック
