@@ -158,11 +158,13 @@ function Initialize-FiNative {
     if ($script:FiNativeType) { return $true }
     if ($script:FiNativeTried) { return $false }
     $script:FiNativeTried = $true
-    try { $script:FiNativeType = [FuncInspectorNative.Engine]; return $true } catch {}
+    # 名前空間にバージョンを付与: C# のシグネチャを変えたら必ず番号を上げること。
+    # こうすると、同一プロセスに残った旧版の型と衝突せず、更新後の型を必ずコンパイルできる。
+    try { $script:FiNativeType = [FuncInspectorNativeV2.Engine]; return $true } catch {}
     $code = @'
 using System;
 using System.Collections.Generic;
-namespace FuncInspectorNative {
+namespace FuncInspectorNativeV2 {
   public class Row { public string File; public int Line; public string Function; public int Steps; }
   public class Sw  { public string Name; public int Count; public int Line; }
   public static class Engine {
@@ -347,7 +349,7 @@ namespace FuncInspectorNative {
 '@
     try {
         Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-        $script:FiNativeType = [FuncInspectorNative.Engine]
+        $script:FiNativeType = [FuncInspectorNativeV2.Engine]
         return $true
     }
     catch { Write-Verbose "FiNative コンパイル失敗 (純PSにフォールバック): $_"; return $false }
