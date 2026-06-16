@@ -781,11 +781,10 @@ function Show-FuncInspectorGui {
     $tbExt = New-Object System.Windows.Forms.TextBox
     $tbExt.Location = '120,45'; $tbExt.Size = '120,24'; $tbExt.Text = '.c,.h'
     $form.Controls.Add($tbExt)
-    $cbExternal = New-Object System.Windows.Forms.CheckBox
-    $cbExternal.Text = '選択スイッチのみ有効(ソース内#defineを無視)'; $cbExternal.Location = '260,46'; $cbExternal.AutoSize = $true; $cbExternal.Checked = $true
-    $form.Controls.Add($cbExternal)
+    # スイッチ表で選んだものだけを有効化 (ソース内 #define は常に無視)。
+    # 全部見たいときだけ「全コード有効」を使う。
     $cbIgnore = New-Object System.Windows.Forms.CheckBox
-    $cbIgnore.Text = '全コード有効(スイッチ無視)'; $cbIgnore.Location = '560,46'; $cbIgnore.AutoSize = $true
+    $cbIgnore.Text = '全コード有効(スイッチ無視)'; $cbIgnore.Location = '260,46'; $cbIgnore.AutoSize = $true
     $form.Controls.Add($cbIgnore)
 
     $lblSw = New-Object System.Windows.Forms.Label
@@ -920,7 +919,8 @@ function Show-FuncInspectorGui {
                     $defines[$nm] = $val
                 }
             }
-            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument([bool]$cbExternal.Checked)
+            # GUI は常に「選択スイッチのみ有効」(external=$true)。ソース内 #define は無視。
+            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument($true)
         }
         $script:FiPS = $ps; $script:FiRS = $rs; $script:FiHandle = $ps.BeginInvoke()
         $timer.Start()
