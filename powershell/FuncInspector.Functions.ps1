@@ -160,13 +160,13 @@ function Initialize-FiNative {
     $script:FiNativeTried = $true
     # 名前空間にバージョンを付与: C# のシグネチャを変えたら必ず番号を上げること。
     # こうすると、同一プロセスに残った旧版の型と衝突せず、更新後の型を必ずコンパイルできる。
-    try { $script:FiNativeType = [FuncInspectorNativeV3.Engine]; return $true } catch {}
+    try { $script:FiNativeType = [FuncInspectorNativeV4.Engine]; return $true } catch {}
     $code = @'
 using System;
 using System.Collections.Generic;
-namespace FuncInspectorNativeV3 {
+namespace FuncInspectorNativeV4 {
   public class Row { public string File; public int Line; public string Function; public int Steps; }
-  public class Sw  { public string Name; public int Count; public int Line; }
+  public class Sw  { public string Name; public int Count; public int Line; public List<string> Vals = new List<string>(); }
   public static class Engine {
     static bool IdStart(char c){ return char.IsLetter(c) || c=='_'; }
     static bool IdChar(char c){ return char.IsLetterOrDigit(c) || c=='_'; }
@@ -332,24 +332,36 @@ namespace FuncInspectorNativeV3 {
       if(!ignore){ var d=new Dictionary<string,string>(defs); clean=Preprocess(clean,d,pinned,external); }
       return Scan(path,clean);
     }
+    static Sw GetOrAdd(Dictionary<string,Sw> map,string name,int line){ Sw s; if(!map.TryGetValue(name,out s)){ s=new Sw{Name=name,Count=0,Line=line}; map[name]=s; } s.Count++; return s; }
+    static void AddVal(Sw s,string v){ if(string.IsNullOrEmpty(v)) return; if(!s.Vals.Contains(v)) s.Vals.Add(v); }
+    static string TokVal(Tok t){ if(t.Kind==0) return t.Num.ToString(); if(t.Kind==1 && t.Id!="defined") return t.Id; return null; }
+    static bool IsCmp(Tok t){ return t.Kind==2 && (t.Id=="=="||t.Id=="!="||t.Id=="<"||t.Id==">"||t.Id=="<="||t.Id==">="); }
     public static List<Sw> CollectSwitches(string src){
       string clean=Strip(src); char[] b=clean.ToCharArray(); int n=b.Length;
       var map=new Dictionary<string,Sw>(); int ls=0; int lineno=0;
       while(ls<=n){ lineno++; int le=ls; while(le<n && b[le]!='\n') le++;
         int rest; int kind=ParseDirective(b,ls,le,out rest);
-        if(kind==1||kind==2){ string nm=FirstIdent(b,rest,le); if(nm!=null) AddSw(map,nm,lineno); }
-        else if(kind==3||kind==4){ int p=rest; while(p<le){ if(IdStart(b[p])){ int s2=p; while(p<le && IdChar(b[p])) p++; string nm=new string(b,s2,p-s2); if(nm!="defined") AddSw(map,nm,lineno); } else p++; } }
+        if(kind==1||kind==2){ string nm=FirstIdent(b,rest,le); if(nm!=null) AddVal(GetOrAdd(map,nm,lineno),"1"); }
+        else if(kind==3||kind==4){
+          var toks=Tokenize(b,rest,le); var compared=new HashSet<string>();
+          for(int i=0;i<toks.Count;i++){ if(IsCmp(toks[i])){
+            Tok L=i-1>=0?toks[i-1]:null; Tok R=i+1<toks.Count?toks[i+1]:null;
+            if(L!=null && L.Kind==1 && L.Id!="defined" && R!=null){ string v=TokVal(R); if(v!=null){ AddVal(GetOrAdd(map,L.Id,lineno),v); compared.Add(L.Id); } }
+            if(R!=null && R.Kind==1 && R.Id!="defined" && L!=null){ string v=TokVal(L); if(v!=null){ AddVal(GetOrAdd(map,R.Id,lineno),v); compared.Add(R.Id); } }
+          } }
+          for(int i=0;i<toks.Count;i++){ if(toks[i].Kind==1 && toks[i].Id=="defined"){ for(int j=i+1;j<toks.Count && j<i+3;j++){ if(toks[j].Kind==1){ AddVal(GetOrAdd(map,toks[j].Id,lineno),"1"); compared.Add(toks[j].Id); break; } } } }
+          for(int i=0;i<toks.Count;i++){ if(toks[i].Kind==1 && toks[i].Id!="defined" && !compared.Contains(toks[i].Id)){ AddVal(GetOrAdd(map,toks[i].Id,lineno),"1"); } }
+        }
         if(le>=n) break; ls=le+1;
       }
       return new List<Sw>(map.Values);
     }
-    static void AddSw(Dictionary<string,Sw> map,string name,int line){ Sw s; if(map.TryGetValue(name,out s)){ s.Count++; } else { map[name]=new Sw{Name=name,Count=1,Line=line}; } }
   }
 }
 '@
     try {
         Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-        $script:FiNativeType = [FuncInspectorNativeV3.Engine]
+        $script:FiNativeType = [FuncInspectorNativeV4.Engine]
         return $true
     }
     catch { Write-Verbose "FiNative コンパイル失敗 (純PSにフォールバック): $_"; return $false }
@@ -516,16 +528,39 @@ function Invoke-FiPreprocess {
     return ($out -join "`n")
 }
 
+function Get-FiTokVal($t) {
+    if ($t.K -eq 'num') { return [string]$t.V }
+    if ($t.K -eq 'id' -and $t.V -ne 'defined') { return [string]$t.V }
+    return $null
+}
+function Get-FiSortedValues($values) {
+    $nums = @($values | Where-Object { $_ -match '^-?\d+$' } | Sort-Object { [int]$_ })
+    $ids = @($values | Where-Object { $_ -notmatch '^-?\d+$' } | Sort-Object)
+    return ((@($nums) + @($ids)) -join ';')
+}
+
 function Get-FiFileSwitches {
-    <# 1ファイルのスイッチ名 -> @{Count;Line(初出)} を返す。 #>
+    <# 1ファイルのスイッチ名 -> @{Count;Line(初出);Values(List)} を返す。 #>
     param([string]$FilePath)
     $res = @{}
     try { $src = [System.IO.File]::ReadAllText($FilePath) } catch { return $res }
     if (Initialize-FiNative) {
-        foreach ($s in $script:FiNativeType::CollectSwitches($src)) { $res[$s.Name] = @{ Count = $s.Count; Line = $s.Line } }
+        foreach ($s in $script:FiNativeType::CollectSwitches($src)) {
+            $vals = New-Object System.Collections.Generic.List[string]
+            foreach ($v in $s.Vals) { $vals.Add([string]$v) }
+            $res[$s.Name] = @{ Count = $s.Count; Line = $s.Line; Values = $vals }
+        }
         return $res
     }
+    # --- 純 PowerShell フォールバック ---
     $clean = Remove-FICommentsStrings $src
+    $cmps = @('==', '!=', '<', '>', '<=', '>=')
+    $addsw = {
+        param($name, $ln, $val)
+        if (-not $res.ContainsKey($name)) { $res[$name] = @{ Count = 0; Line = $ln; Values = (New-Object System.Collections.Generic.List[string]) } }
+        $res[$name].Count++
+        if ($null -ne $val -and -not $res[$name].Values.Contains($val)) { $res[$name].Values.Add($val) }
+    }
     $ln = 0
     foreach ($line in ($clean -split "`n")) {
         $ln++
@@ -534,16 +569,29 @@ function Get-FiFileSwitches {
         $kind = $m.Groups[1].Value; $rest = $m.Groups[2].Value
         if ($kind -eq 'ifdef' -or $kind -eq 'ifndef') {
             $idm = $script:FiRxId.Match($rest)
-            if ($idm.Success) {
-                if ($res.ContainsKey($idm.Value)) { $res[$idm.Value].Count++ }
-                else { $res[$idm.Value] = @{ Count = 1; Line = $ln } }
-            }
+            if ($idm.Success) { & $addsw $idm.Value $ln '1' }
         }
         elseif ($kind -eq 'if' -or $kind -eq 'elif') {
-            foreach ($im in $script:FiRxId.Matches($rest)) {
-                if ($im.Value -eq 'defined') { continue }
-                if ($res.ContainsKey($im.Value)) { $res[$im.Value].Count++ }
-                else { $res[$im.Value] = @{ Count = 1; Line = $ln } }
+            $toks = ConvertTo-FiTokens $rest
+            $compared = @{}
+            for ($i = 0; $i -lt $toks.Count; $i++) {
+                $t = $toks[$i]
+                if ($t.K -eq 'op' -and $cmps -contains $t.V) {
+                    $L = if ($i - 1 -ge 0) { $toks[$i - 1] } else { $null }
+                    $R = if ($i + 1 -lt $toks.Count) { $toks[$i + 1] } else { $null }
+                    if ($L -and $L.K -eq 'id' -and $L.V -ne 'defined' -and $R) { $v = Get-FiTokVal $R; if ($null -ne $v) { & $addsw $L.V $ln $v; $compared[$L.V] = $true } }
+                    if ($R -and $R.K -eq 'id' -and $R.V -ne 'defined' -and $L) { $v = Get-FiTokVal $L; if ($null -ne $v) { & $addsw $R.V $ln $v; $compared[$R.V] = $true } }
+                }
+            }
+            for ($i = 0; $i -lt $toks.Count; $i++) {
+                if ($toks[$i].K -eq 'id' -and $toks[$i].V -eq 'defined') {
+                    for ($j = $i + 1; $j -lt $toks.Count -and $j -lt $i + 3; $j++) {
+                        if ($toks[$j].K -eq 'id') { & $addsw $toks[$j].V $ln '1'; $compared[$toks[$j].V] = $true; break }
+                    }
+                }
+            }
+            foreach ($t in $toks) {
+                if ($t.K -eq 'id' -and $t.V -ne 'defined' -and -not $compared.ContainsKey($t.V)) { & $addsw $t.V $ln '1' }
             }
         }
     }
@@ -561,8 +609,11 @@ function Get-CSwitch {
         Write-Progress -Activity 'FuncInspector' -Status ("スイッチ検出 {0}/{1} {2}" -f $i, $total, $f) -PercentComplete ($(if ($total) { $i * 100 / $total } else { 100 }))
         $fs = Get-FiFileSwitches -FilePath $f
         foreach ($name in $fs.Keys) {
-            if ($agg.ContainsKey($name)) { $agg[$name].Count += $fs[$name].Count }
-            else { $agg[$name] = [pscustomobject]@{ Count = $fs[$name].Count; File = $f; Line = $fs[$name].Line } }
+            if (-not $agg.ContainsKey($name)) {
+                $agg[$name] = [pscustomobject]@{ Count = 0; File = $f; Line = $fs[$name].Line; Values = (New-Object System.Collections.Generic.List[string]) }
+            }
+            $agg[$name].Count += $fs[$name].Count
+            foreach ($v in $fs[$name].Values) { if (-not $agg[$name].Values.Contains([string]$v)) { $agg[$name].Values.Add([string]$v) } }
         }
     }
     Write-Progress -Activity 'FuncInspector' -Completed
@@ -970,12 +1021,12 @@ function Invoke-FuncInspector {
         $agg = Get-CSwitch -Path $Path -Extensions $Extensions
         $rows = foreach ($name in ($agg.Keys | Sort-Object)) {
             $st = if ($defines.ContainsKey($name)) { 'ON' } else { 'OFF' }
-            [pscustomobject]@{ Switch = $name; Occurrences = $agg[$name].Count; State = $st; File = $agg[$name].File; Line = $agg[$name].Line }
+            [pscustomobject]@{ Switch = $name; Occurrences = $agg[$name].Count; State = $st; File = $agg[$name].File; Line = $agg[$name].Line; Values = (Get-FiSortedValues $agg[$name].Values) }
         }
         if ($AsObject) { return $rows }
         $lines = New-Object System.Collections.Generic.List[string]
-        if (-not $NoHeader) { $lines.Add('switch,occurrences,state,filepath,line') }
-        foreach ($r in $rows) { $lines.Add(("{0},{1},{2},{3},{4}" -f $r.Switch, $r.Occurrences, $r.State, $r.File, $r.Line)) }
+        if (-not $NoHeader) { $lines.Add('switch,occurrences,state,filepath,line,values') }
+        foreach ($r in $rows) { $lines.Add(("{0},{1},{2},{3},{4},{5}" -f $r.Switch, $r.Occurrences, $r.State, $r.File, $r.Line, $r.Values)) }
         $text = [string]::Join("`r`n", $lines)
         if ($Out) { [System.IO.File]::WriteAllText($Out, $text + "`r`n", [System.Text.Encoding]::UTF8); Write-Host ("{0} に書き出しました" -f $Out) }
         elseif ($text) { Write-Output $text }

@@ -58,8 +58,16 @@ TESTS = [
                  "absent": ["leg", "v2"]}),
 
     dict(id="switch-list", file="switches.c", mode="switches", defines=[], ignore=False,
-         desc="スイッチ一覧: 出現回数と状態",
-         expect={"switches": {"CFG_A": (2, "OFF"), "CFG_B": (1, "OFF"), "VER": (1, "OFF")}}),
+         desc="スイッチ一覧: 出現回数・状態・値候補",
+         expect={"switches": {"CFG_A": (2, "OFF", "1"), "CFG_B": (1, "OFF", "1"), "VER": (1, "OFF", "2")}}),
+
+    dict(id="switch-values", file="values.c", mode="switches", defines=[], ignore=False,
+         desc="値候補の抽出: ==1/==2 は 1;2、==variable は variable、ifdef/bool は 1",
+         expect={"switches": {
+             "LOCAL_LOG_ENABLE": (1, "OFF", "1"),
+             "TOOL_TEST": (2, "OFF", "1;2"),
+             "MODE": (1, "OFF", "variable"),
+             "variable": (1, "OFF", "MODE")}}),
 
     dict(id="pin-default", file="pinned.c", mode="scan", defines=[], ignore=False,
          desc="ピン留め既定: ソース内 #define TOOL_TEST 0 が効き test_only は隠れる",
@@ -176,11 +184,11 @@ def parse_scan(text):
 
 
 def parse_switches(text):
-    """-> dict switch->(occ, state)"""
+    """-> dict switch->(occ, state, values)"""
     out = {}
     for ln in text.splitlines():
         p = ln.split(",")
-        if len(p) != 5:
+        if len(p) < 5:
             continue
         try:
             occ = int(p[1])
@@ -188,7 +196,8 @@ def parse_switches(text):
             continue
         if p[2] not in ("ON", "OFF"):
             continue
-        out[p[0]] = (occ, p[2])
+        values = p[5] if len(p) >= 6 else ""
+        out[p[0]] = (occ, p[2], values)
     return out
 
 
@@ -218,9 +227,14 @@ def check_expect(t, text):
         problems = []
         if set(got) != set(exp):
             problems.append("集合差: 検出=%s 期待=%s" % (sorted(got), sorted(exp)))
-        for name, (occ, state) in exp.items():
-            if name in got and got[name] != (occ, state):
-                problems.append("%s=%s (期待 %s)" % (name, got[name], (occ, state)))
+        for name, spec in exp.items():
+            if name not in got:
+                continue
+            occ, state = spec[0], spec[1]
+            if got[name][0] != occ or got[name][1] != state:
+                problems.append("%s=(%s,%s) (期待 %s,%s)" % (name, got[name][0], got[name][1], occ, state))
+            if len(spec) >= 3 and got[name][2] != spec[2]:
+                problems.append("%s values='%s' (期待 '%s')" % (name, got[name][2], spec[2]))
         return (not problems), ("; ".join(problems) if problems else "OK")
 
 

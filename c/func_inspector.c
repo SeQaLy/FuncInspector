@@ -529,12 +529,18 @@ static void scan_functions(const char *path, const char *buf, size_t n) {
 }
 
 /* ---- スイッチ収集 -------------------------------------------------------- */
-typedef struct { char name[128]; int count; char file[1024]; long line; } SwEntry;
+#define SW_MAXVALS 32
+typedef struct {
+    char name[128]; int count; char file[1024]; long line;
+    char vals[SW_MAXVALS][40]; int nvals;
+} SwEntry;
 typedef struct { SwEntry *items; int count, cap; } SwSet;
 static void sw_init(SwSet *s) { s->items = NULL; s->count = 0; s->cap = 0; }
-static void sw_add(SwSet *s, const char *name, const char *file, long line) {
+
+/* 名前で find-or-add し index を返す */
+static int sw_find_or_add(SwSet *s, const char *name, const char *file, long line) {
     for (int i = 0; i < s->count; ++i)
-        if (strcmp(s->items[i].name, name) == 0) { s->items[i].count++; return; }
+        if (strcmp(s->items[i].name, name) == 0) { s->items[i].count++; return i; }
     if (s->count == s->cap) {
         s->cap = s->cap ? s->cap * 2 : 32;
         s->items = realloc(s->items, s->cap * sizeof(SwEntry));
@@ -542,11 +548,57 @@ static void sw_add(SwSet *s, const char *name, const char *file, long line) {
     SwEntry *e = &s->items[s->count];
     strncpy(e->name, name, 127); e->name[127] = '\0';
     strncpy(e->file, file, sizeof(e->file) - 1); e->file[sizeof(e->file) - 1] = '\0';
-    e->line = line; e->count = 1; s->count++;
+    e->line = line; e->count = 1; e->nvals = 0;
+    return s->count++;
+}
+static void sw_add_value(SwSet *s, int idx, const char *val) {
+    if (!val || !*val) return;
+    SwEntry *e = &s->items[idx];
+    for (int i = 0; i < e->nvals; ++i) if (strcmp(e->vals[i], val) == 0) return;
+    if (e->nvals < SW_MAXVALS) { strncpy(e->vals[e->nvals], val, 39); e->vals[e->nvals][39] = '\0'; e->nvals++; }
 }
 static void sw_free(SwSet *s) { free(s->items); sw_init(s); }
 static int sw_cmp(const void *a, const void *b) {
     return strcmp(((const SwEntry *)a)->name, ((const SwEntry *)b)->name);
+}
+static int str_is_num(const char *s) {
+    if (!*s) return 0;
+    if (*s == '-') s++;
+    if (!*s) return 0;
+    for (; *s; ++s) if (!isdigit((unsigned char)*s)) return 0;
+    return 1;
+}
+static int valcmp(const void *a, const void *b) {
+    const char *x = *(const char *const *)a, *y = *(const char *const *)b;
+    int xn = str_is_num(x), yn = str_is_num(y);
+    if (xn && yn) { long lx = atol(x), ly = atol(y); return (lx > ly) - (lx < ly); }
+    if (xn != yn) return xn ? -1 : 1;   /* 数値を先に */
+    return strcmp(x, y);
+}
+/* 値候補を「数値→名前」順に ; 連結 */
+static void sw_values_string(const SwEntry *e, char *out, size_t outsz) {
+    const char *ptr[SW_MAXVALS];
+    int m = e->nvals; if (m > SW_MAXVALS) m = SW_MAXVALS;
+    for (int i = 0; i < m; ++i) ptr[i] = e->vals[i];
+    qsort(ptr, m, sizeof(ptr[0]), valcmp);
+    size_t o = 0; out[0] = '\0';
+    for (int i = 0; i < m; ++i) {
+        size_t need = strlen(ptr[i]) + (i ? 1 : 0);
+        if (o + need + 1 >= outsz) break;
+        if (i) out[o++] = ';';
+        strcpy(out + o, ptr[i]); o += strlen(ptr[i]);
+    }
+}
+
+/* 比較相手トークンを値文字列へ。num→数値, id(≠defined)→名前, それ以外 NULL */
+static const char *tokval(const Tok *t, char *buf, size_t bufsz) {
+    if (t->kind == 0) { snprintf(buf, bufsz, "%ld", t->num); return buf; }
+    if (t->kind == 1 && strcmp(t->id, "defined") != 0) return t->id;
+    return NULL;
+}
+static int is_cmp_op(const Tok *t) {
+    return t->kind == 2 && (!strcmp(t->id, "==") || !strcmp(t->id, "!=") ||
+        !strcmp(t->id, "<") || !strcmp(t->id, ">") || !strcmp(t->id, "<=") || !strcmp(t->id, ">="));
 }
 
 static void collect_switches(const char *buf, size_t n, SwSet *sw, const char *path) {
@@ -557,16 +609,46 @@ static void collect_switches(const char *buf, size_t n, SwSet *sw, const char *p
         size_t rest; int kind = parse_directive(buf, ls, le, &rest);
         if (kind == D_IFDEF || kind == D_IFNDEF) {
             char nm[64]; size_t after;
-            if (first_ident(buf, rest, le, nm, sizeof(nm), &after)) sw_add(sw, nm, path, lineno);
+            if (first_ident(buf, rest, le, nm, sizeof(nm), &after))
+                sw_add_value(sw, sw_find_or_add(sw, nm, path, lineno), "1");
         } else if (kind == D_IF || kind == D_ELIF) {
-            size_t p = rest;
-            while (p < le) {
-                if (ident_start((unsigned char)buf[p])) {
-                    size_t s2 = p; while (p < le && ident_char((unsigned char)buf[p])) p++;
-                    size_t l2 = p - s2; char nm[64]; if (l2 >= sizeof(nm)) l2 = sizeof(nm)-1;
-                    memcpy(nm, buf + s2, l2); nm[l2] = '\0';
-                    if (strcmp(nm, "defined") != 0) sw_add(sw, nm, path, lineno);
-                } else p++;
+            Tok toks[256];
+            int nt = tokenize_expr(buf, rest, le, toks, 256);
+            char vb[40];
+            /* どの名前が比較に使われたか (素のブール扱いを避ける) */
+            char compared[64][128]; int ncmp = 0;
+            for (int i = 0; i < nt; ++i) {
+                if (is_cmp_op(&toks[i])) {
+                    Tok *L = (i - 1 >= 0) ? &toks[i - 1] : NULL;
+                    Tok *R = (i + 1 < nt) ? &toks[i + 1] : NULL;
+                    if (L && L->kind == 1 && strcmp(L->id, "defined") != 0 && R) {
+                        const char *v = tokval(R, vb, sizeof(vb));
+                        if (v) { sw_add_value(sw, sw_find_or_add(sw, L->id, path, lineno), v);
+                                 if (ncmp < 64) { strncpy(compared[ncmp], L->id, 127); compared[ncmp++][127] = '\0'; } }
+                    }
+                    if (R && R->kind == 1 && strcmp(R->id, "defined") != 0 && L) {
+                        const char *v = tokval(L, vb, sizeof(vb));
+                        if (v) { sw_add_value(sw, sw_find_or_add(sw, R->id, path, lineno), v);
+                                 if (ncmp < 64) { strncpy(compared[ncmp], R->id, 127); compared[ncmp++][127] = '\0'; } }
+                    }
+                }
+            }
+            for (int i = 0; i < nt; ++i) {  /* defined(NAME) -> 1 */
+                if (toks[i].kind == 1 && strcmp(toks[i].id, "defined") == 0) {
+                    for (int j = i + 1; j < nt && j < i + 3; ++j)
+                        if (toks[j].kind == 1) {
+                            sw_add_value(sw, sw_find_or_add(sw, toks[j].id, path, lineno), "1");
+                            if (ncmp < 64) { strncpy(compared[ncmp], toks[j].id, 127); compared[ncmp++][127] = '\0'; }
+                            break;
+                        }
+                }
+            }
+            for (int i = 0; i < nt; ++i) {  /* 素の識別子使用 (#if FOO) -> 1 */
+                if (toks[i].kind == 1 && strcmp(toks[i].id, "defined") != 0) {
+                    int seen = 0;
+                    for (int c = 0; c < ncmp; ++c) if (strcmp(compared[c], toks[i].id) == 0) { seen = 1; break; }
+                    if (!seen) sw_add_value(sw, sw_find_or_add(sw, toks[i].id, path, lineno), "1");
+                }
             }
         }
         if (le >= n) break;
@@ -745,11 +827,12 @@ int main(int argc, char **argv) {
         for (int i = 0; i < npaths; ++i) walk(paths[i], cb_switches, &sw);
         fprintf(stderr, "\r%-70s\r", "");   /* 進捗行をクリア */
         qsort(sw.items, sw.count, sizeof(SwEntry), sw_cmp);
-        if (g_header) fprintf(g_out, "switch,occurrences,state,filepath,line\n");
+        if (g_header) fprintf(g_out, "switch,occurrences,state,filepath,line,values\n");
         for (int i = 0; i < sw.count; ++i) {
-            fprintf(g_out, "%s,%d,%s,%s,%ld\n", sw.items[i].name, sw.items[i].count,
+            char vals[512]; sw_values_string(&sw.items[i], vals, sizeof(vals));
+            fprintf(g_out, "%s,%d,%s,%s,%ld,%s\n", sw.items[i].name, sw.items[i].count,
                     defs_has(&g_defines, sw.items[i].name) ? "ON" : "OFF",
-                    sw.items[i].file, sw.items[i].line);
+                    sw.items[i].file, sw.items[i].line, vals);
         }
         fprintf(stderr, "%d 個のスイッチ\n", sw.count);
         sw_free(&sw);

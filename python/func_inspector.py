@@ -94,16 +94,33 @@ def strip_comments_strings(src: str) -> str:
 # --------------------------------------------------------------------------
 # コンパイルスイッチの収集
 # --------------------------------------------------------------------------
+_CMP_OPS = {'==', '!=', '<', '>', '<=', '>='}
+
+
+def _tokval(t):
+    """比較相手トークンを値文字列に。num->数値, id->その名前(変数), defined等は None。"""
+    if t[0] == 'num':
+        return str(t[1])
+    if t[0] == 'id' and t[1] != 'defined':
+        return t[1]
+    return None
+
+
 def collect_switches(src: str) -> dict:
-    """#if 系ディレクティブで参照されるマクロ名 -> [出現回数, 初出行] を返す。"""
+    """#if 系ディレクティブで参照されるマクロ名 -> [出現回数, 初出行, 値候補set]。
+    値候補: `NAME == 1` なら '1'、`NAME == VAR` なら 'VAR'、
+    `#ifdef`/`defined(NAME)`/ブール使用は '1'。
+    """
     clean = strip_comments_strings(src)
     counts = {}
 
-    def add(name, lineno):
+    def add(name, lineno, value=None):
         if name in counts:
             counts[name][0] += 1
         else:
-            counts[name] = [1, lineno]
+            counts[name] = [1, lineno, set()]
+        if value is not None:
+            counts[name][2].add(value)
 
     for lineno, line in enumerate(clean.split('\n'), start=1):
         m = _DIRECTIVE.match(line)
@@ -113,14 +130,45 @@ def collect_switches(src: str) -> dict:
         if kind in ('ifdef', 'ifndef'):
             mm = _IDENT.search(rest)
             if mm:
-                add(mm.group(0), lineno)
+                add(mm.group(0), lineno, '1')
         elif kind in ('if', 'elif'):
-            for mm in _IDENT.finditer(rest):
-                name = mm.group(0)
-                if name == 'defined':
-                    continue
-                add(name, lineno)
+            toks = _tokenize_expr(rest)
+            compared = set()
+            # 比較式 NAME <op> 値 / 値 <op> NAME から値候補を集める
+            for i, t in enumerate(toks):
+                if t[0] == 'op' and t[1] in _CMP_OPS:
+                    left = toks[i - 1] if i - 1 >= 0 else None
+                    right = toks[i + 1] if i + 1 < len(toks) else None
+                    if left and left[0] == 'id' and left[1] != 'defined' and right:
+                        v = _tokval(right)
+                        if v is not None:
+                            add(left[1], lineno, v)
+                            compared.add(left[1])
+                    if right and right[0] == 'id' and right[1] != 'defined' and left:
+                        v = _tokval(left)
+                        if v is not None:
+                            add(right[1], lineno, v)
+                            compared.add(right[1])
+            # defined(NAME) -> '1'
+            for i, t in enumerate(toks):
+                if t[0] == 'id' and t[1] == 'defined':
+                    for j in range(i + 1, min(i + 3, len(toks))):
+                        if toks[j][0] == 'id':
+                            add(toks[j][1], lineno, '1')
+                            compared.add(toks[j][1])
+                            break
+            # それ以外の素の識別子使用 (#if FOO など) -> '1'
+            for t in toks:
+                if t[0] == 'id' and t[1] != 'defined' and t[1] not in compared:
+                    add(t[1], lineno, '1')
     return counts
+
+
+def _sort_values(values):
+    """数値→小さい順、識別子→名前順 に並べた文字列リスト。"""
+    nums = sorted((v for v in values if v.lstrip('-').isdigit()), key=lambda s: int(s))
+    ids = sorted(v for v in values if not v.lstrip('-').isdigit())
+    return nums + ids
 
 
 # --------------------------------------------------------------------------
@@ -546,11 +594,12 @@ def switches_in_paths(paths, exts, progress=None):
         src = _read(fp)
         if src is None:
             continue
-        for name, (c, ln) in collect_switches(src).items():
+        for name, (c, ln, vals) in collect_switches(src).items():
             if name in agg:
                 agg[name]['count'] += c
+                agg[name]['values'].update(vals)
             else:
-                agg[name] = {'count': c, 'file': fp, 'line': ln}
+                agg[name] = {'count': c, 'file': fp, 'line': ln, 'values': set(vals)}
     return agg
 
 
@@ -905,12 +954,13 @@ def main(argv=None):
         _cli_progress_done()
         lines = []
         if not args.no_header:
-            lines.append("switch,occurrences,state,filepath,line")
+            lines.append("switch,occurrences,state,filepath,line,values")
         for name in sorted(agg):
             info = agg[name]
             state = "ON" if name in defines else "OFF"
-            lines.append("%s,%d,%s,%s,%d" % (name, info["count"], state,
-                                             info["file"], info["line"]))
+            vals = ";".join(_sort_values(info["values"]))
+            lines.append("%s,%d,%s,%s,%d,%s" % (name, info["count"], state,
+                                                info["file"], info["line"], vals))
         text = "\n".join(lines)
         _emit(text, args.out)
         sys.stderr.write("%d 個のスイッチ\n" % len(agg))
