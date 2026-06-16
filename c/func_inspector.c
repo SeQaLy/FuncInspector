@@ -515,7 +515,7 @@ static void scan_functions(const char *path, const char *buf, size_t n) {
                     memcpy(name, buf + i, nl); name[nl] = '\0';
                     fprintf(g_out, "%s,%ld,%s,%d\n", path, line_of(st, cnt, i), name, steps);
                     g_func_total++; g_step_total += steps;
-                    i = q + 1; continue;
+                    i = close + 1; continue;   /* 本体は再走査しない */
                 }
                 i = p; continue;
             } else { i = j; continue; }

@@ -150,6 +150,209 @@ $script:FiRxId = [regex]'[A-Za-z_]\w*'
 # このファイル自身のパス (GUI のバックグラウンド runspace から再読込するため)
 $script:FiScriptPath = $PSCommandPath
 
+# --- 高速化: ホットパス(コメント除去/プリプロセス/関数走査/スイッチ収集)を ---
+# --- C# にコンパイルして実行する。失敗時は純 PowerShell 実装にフォールバック。 ---
+$script:FiNativeType = $null
+$script:FiNativeTried = $false
+function Initialize-FiNative {
+    if ($script:FiNativeType) { return $true }
+    if ($script:FiNativeTried) { return $false }
+    $script:FiNativeTried = $true
+    try { $script:FiNativeType = [FuncInspectorNative.Engine]; return $true } catch {}
+    $code = @'
+using System;
+using System.Collections.Generic;
+namespace FuncInspectorNative {
+  public class Row { public string File; public int Line; public string Function; public int Steps; }
+  public class Sw  { public string Name; public int Count; public int Line; }
+  public static class Engine {
+    static bool IdStart(char c){ return char.IsLetter(c) || c=='_'; }
+    static bool IdChar(char c){ return char.IsLetterOrDigit(c) || c=='_'; }
+    static readonly HashSet<string> KW = new HashSet<string>(new string[]{
+      "if","for","while","switch","return","sizeof","do","else","goto","case","default",
+      "typedef","struct","union","enum","static","extern","const","volatile","register",
+      "auto","signed","unsigned","void","char","short","int","long","float","double",
+      "_Bool","inline","__inline","__attribute__","_Static_assert","_Generic","_Alignas",
+      "defined","asm","__asm" });
+
+    public static string Strip(string src){
+      int n=src.Length; char[] o=new char[n]; int i=0;
+      while(i<n){
+        char c=src[i];
+        if(c=='/' && i+1<n && src[i+1]=='/'){ while(i<n && src[i]!='\n'){o[i]=' ';i++;} }
+        else if(c=='/' && i+1<n && src[i+1]=='*'){ o[i]=' '; o[i+1]=' '; i+=2;
+          while(i<n && !(src[i]=='*' && i+1<n && src[i+1]=='/')){ o[i]= src[i]=='\n'?'\n':' '; i++; }
+          if(i<n){ o[i]=' '; if(i+1<n)o[i+1]=' '; i+=2; } }
+        else if(c=='"' || c=='\''){ char q=c; o[i]=' '; i++;
+          while(i<n && src[i]!=q){ if(src[i]=='\\' && i+1<n){o[i]=' ';o[i+1]=' ';i+=2;} else {o[i]= src[i]=='\n'?'\n':' ';i++;} }
+          if(i<n){o[i]=' ';i++;} }
+        else { o[i]=c; i++; }
+      }
+      return new string(o);
+    }
+
+    static int ParseDirective(char[] b,int ls,int le,out int rest){
+      int p=ls; rest=ls;
+      while(p<le && (b[p]==' '||b[p]=='\t')) p++;
+      if(p>=le || b[p]!='#') return 0;
+      p++; while(p<le && (b[p]==' '||b[p]=='\t')) p++;
+      int k=p; while(p<le && char.IsLetter(b[p])) p++;
+      rest=p; string kw=new string(b,k,p-k);
+      switch(kw){ case "ifdef":return 1; case "ifndef":return 2; case "if":return 3;
+        case "elif":return 4; case "else":return 5; case "endif":return 6;
+        case "define":return 7; case "undef":return 8; default:return 0; }
+    }
+    static string FirstIdent(char[] b,int s,int e){
+      int p=s; while(p<e && !IdStart(b[p])) p++; if(p>=e) return null;
+      int st=p; while(p<e && IdChar(b[p])) p++; return new string(b,st,p-st);
+    }
+    static string FirstIdentAfter(char[] b,int s,int e,out int after){
+      int p=s; while(p<e && !IdStart(b[p])) p++; if(p>=e){ after=e; return null; }
+      int st=p; while(p<e && IdChar(b[p])) p++; after=p; return new string(b,st,p-st);
+    }
+
+    static bool IsHex(char c){ return (c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F'); }
+    class Tok { public int Kind; public long Num; public string Id; }
+    static List<Tok> Tokenize(char[] b,int s,int e){
+      var t=new List<Tok>(); int i=s;
+      while(i<e){ char c=b[i];
+        if(char.IsWhiteSpace(c)){i++;continue;}
+        if(char.IsDigit(c)){ long val;
+          if(c=='0' && i+1<e && (b[i+1]=='x'||b[i+1]=='X')){ int j=i+2; while(j<e && IsHex(b[j])) j++; val=Convert.ToInt64(new string(b,i,j-i),16); i=j; }
+          else { int j=i; while(j<e && char.IsDigit(b[j])) j++; val=long.Parse(new string(b,i,j-i)); while(j<e && (b[j]=='u'||b[j]=='U'||b[j]=='l'||b[j]=='L')) j++; i=j; }
+          t.Add(new Tok{Kind=0,Num=val}); continue; }
+        if(IdStart(c)){ int j=i; while(j<e && IdChar(b[j])) j++; t.Add(new Tok{Kind=1,Id=new string(b,i,j-i)}); i=j; continue; }
+        if(i+1<e){ string two=new string(b,i,2);
+          if(two=="&&"||two=="||"||two=="=="||two=="!="||two=="<="||two==">="){ t.Add(new Tok{Kind=2,Id=two}); i+=2; continue; } }
+        if("!()<>+-*/%".IndexOf(c)>=0){ t.Add(new Tok{Kind=2,Id=c.ToString()}); i++; continue; }
+        i++;
+      }
+      return t;
+    }
+    class Pr {
+      List<Tok> t; int pos; Dictionary<string,string> d;
+      public Pr(List<Tok> toks,Dictionary<string,string> defs){ t=toks; pos=0; d=defs; }
+      Tok Peek(){ return pos<t.Count? t[pos]:null; }
+      Tok Adv(){ return t[pos++]; }
+      bool IsOp(Tok x,string o){ return x!=null && x.Kind==2 && x.Id==o; }
+      long MacroInt(string name,HashSet<string> seen){
+        if(!d.ContainsKey(name)) return 0; if(seen.Contains(name)) return 0;
+        string v=d[name]; if(string.IsNullOrEmpty(v)) return 1; v=v.Trim();
+        long val; if(long.TryParse(v,out val)) return val;
+        if(v.Length>2 && v[0]=='0' && (v[1]=='x'||v[1]=='X')){ try { return Convert.ToInt64(v,16); } catch {} }
+        bool isId=v.Length>0 && IdStart(v[0]); for(int k=1; isId && k<v.Length; k++) if(!IdChar(v[k])) isId=false;
+        if(isId){ seen.Add(name); return MacroInt(v,seen); }
+        return 0;
+      }
+      long Ap(string op,long a,long b){ switch(op){
+        case "*":return a*b; case "/":return b!=0?a/b:0; case "%":return b!=0?a%b:0;
+        case "+":return a+b; case "-":return a-b; case "<":return a<b?1:0; case ">":return a>b?1:0;
+        case "<=":return a<=b?1:0; case ">=":return a>=b?1:0; case "==":return a==b?1:0; case "!=":return a!=b?1:0;
+        case "&&":return (a!=0&&b!=0)?1:0; case "||":return (a!=0||b!=0)?1:0; } return 0; }
+      long Primary(){ Tok x=Peek(); if(x==null) return 0;
+        if(IsOp(x,"(")){ Adv(); long v=Or(); if(IsOp(Peek(),")")) Adv(); return v; }
+        if(x.Kind==1 && x.Id=="defined"){ Adv(); string nm=null; Tok p=Peek();
+          if(IsOp(p,"(")){ Adv(); Tok q=Peek(); if(q!=null&&q.Kind==1) nm=Adv().Id; if(IsOp(Peek(),")")) Adv(); }
+          else if(p!=null&&p.Kind==1) nm=Adv().Id;
+          return (nm!=null && d.ContainsKey(nm))?1:0; }
+        if(x.Kind==1){ Adv(); return MacroInt(x.Id,new HashSet<string>()); }
+        if(x.Kind==0){ Adv(); return x.Num; }
+        Adv(); return 0; }
+      long Unary(){ Tok x=Peek(); if(x!=null&&x.Kind==2&&(x.Id=="!"||x.Id=="-"||x.Id=="+")){ Adv(); long v=Unary(); if(x.Id=="!") return v!=0?0:1; if(x.Id=="-") return -v; return v; } return Primary(); }
+      long Mul(){ long v=Unary(); while(true){ Tok x=Peek(); if(x!=null&&x.Kind==2&&(x.Id=="*"||x.Id=="/"||x.Id=="%")){ Adv(); v=Ap(x.Id,v,Unary()); } else break; } return v; }
+      long Add(){ long v=Mul(); while(true){ Tok x=Peek(); if(x!=null&&x.Kind==2&&(x.Id=="+"||x.Id=="-")){ Adv(); v=Ap(x.Id,v,Mul()); } else break; } return v; }
+      long Rel(){ long v=Add(); while(true){ Tok x=Peek(); if(x!=null&&x.Kind==2&&(x.Id=="<"||x.Id==">"||x.Id=="<="||x.Id==">=")){ Adv(); v=Ap(x.Id,v,Add()); } else break; } return v; }
+      long Eq(){ long v=Rel(); while(true){ Tok x=Peek(); if(x!=null&&x.Kind==2&&(x.Id=="=="||x.Id=="!=")){ Adv(); v=Ap(x.Id,v,Rel()); } else break; } return v; }
+      long AndE(){ long v=Eq(); while(true){ Tok x=Peek(); if(IsOp(x,"&&")){ Adv(); v=Ap("&&",v,Eq()); } else break; } return v; }
+      public long Or(){ long v=AndE(); while(true){ Tok x=Peek(); if(IsOp(x,"||")){ Adv(); v=Ap("||",v,AndE()); } else break; } return v; }
+    }
+    static long EvalIf(char[] b,int s,int e,Dictionary<string,string> defs){
+      var p=new Pr(Tokenize(b,s,e),defs); try { return p.Or()!=0?1:0; } catch { return 0; } }
+
+    public static string Preprocess(string clean,Dictionary<string,string> defs){
+      char[] b=clean.ToCharArray(); int n=b.Length;
+      var par=new List<bool>(); var tak=new List<bool>(); var act=new List<bool>();
+      int ls=0;
+      while(ls<=n){
+        int le=ls; while(le<n && b[le]!='\n') le++;
+        bool emit=true; for(int k=0;k<act.Count;k++){ if(!act[k]){emit=false;break;} }
+        int rest; int kind=ParseDirective(b,ls,le,out rest); bool blank=false;
+        if(kind!=0){ blank=true;
+          if(kind==1){ string nm=FirstIdent(b,rest,le); bool cond=nm!=null && defs.ContainsKey(nm); par.Add(emit); tak.Add(emit&&cond); act.Add(emit&&cond); }
+          else if(kind==2){ string nm=FirstIdent(b,rest,le); bool cond=(nm==null)||!defs.ContainsKey(nm); par.Add(emit); tak.Add(emit&&cond); act.Add(emit&&cond); }
+          else if(kind==3){ bool cond=emit && (EvalIf(b,rest,le,defs)!=0); par.Add(emit); tak.Add(emit&&cond); act.Add(emit&&cond); }
+          else if(kind==4){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ bool cond=EvalIf(b,rest,le,defs)!=0; act[idx]=cond; if(cond)tak[idx]=true; } else act[idx]=false; } }
+          else if(kind==5){ int idx=act.Count-1; if(idx>=0){ if(par[idx] && !tak[idx]){ act[idx]=true; tak[idx]=true; } else act[idx]=false; } }
+          else if(kind==6){ int idx=act.Count-1; if(idx>=0){ par.RemoveAt(idx); tak.RemoveAt(idx); act.RemoveAt(idx); } }
+          else if(kind==7){ if(emit){ int after; string nm=FirstIdentAfter(b,rest,le,out after); if(nm!=null){ int vs=after; while(vs<le && (b[vs]==' '||b[vs]=='\t')) vs++; int ve=le; while(ve>vs && (b[ve-1]==' '||b[ve-1]=='\t'||b[ve-1]=='\r')) ve--; string val= ve>vs? new string(b,vs,ve-vs) : "1"; defs[nm]=val; } } }
+          else if(kind==8){ if(emit){ string nm=FirstIdent(b,rest,le); if(nm!=null && defs.ContainsKey(nm)) defs.Remove(nm); } }
+        } else { if(!emit) blank=true; }
+        if(blank){ for(int p=ls;p<le;p++) b[p]=' '; }
+        if(le>=n) break; ls=le+1;
+      }
+      return new string(b);
+    }
+
+    static bool MemberAccess(string s,int idx){ int j=idx-1; while(j>=0 && (s[j]==' '||s[j]=='\t'||s[j]=='\r'||s[j]=='\n')) j--; if(j<0) return false; if(s[j]=='.') return true; if(s[j]=='>' && j-1>=0 && s[j-1]=='-') return true; return false; }
+    static int LineOf(int[] st,int idx){ int lo=0,hi=st.Length; while(lo<hi){ int mid=(lo+hi)/2; if(st[mid]<=idx) lo=mid+1; else hi=mid; } return lo; }
+    static int CountSteps(string[] lines,int l1,int l2){ int cnt=0; for(int k=l1;k<=l2;k++){ if(k<1||k>lines.Length) continue; string s=lines[k-1]; bool nb=false; for(int p=0;p<s.Length;p++){ char ch=s[p]; if(char.IsWhiteSpace(ch)) continue; if(ch!='{'&&ch!='}'){ nb=true; break; } } if(nb) cnt++; } return cnt; }
+
+    public static List<Row> Scan(string path,string clean){
+      int n=clean.Length;
+      var starts=new List<int>(); starts.Add(0);
+      for(int i=0;i<n;i++) if(clean[i]=='\n') starts.Add(i+1);
+      int[] st=starts.ToArray(); string[] lines=clean.Split('\n');
+      var res=new List<Row>(); int q2=0;
+      while(q2<n){ char c=clean[q2];
+        if(IdStart(c)){
+          int j=q2; while(j<n && IdChar(clean[j])) j++; string name=clean.Substring(q2,j-q2);
+          int k=j; while(k<n && (clean[k]==' '||clean[k]=='\t'||clean[k]=='\r'||clean[k]=='\n')) k++;
+          if(k<n && clean[k]=='(' && !KW.Contains(name)){
+            int depth=0; int p=k;
+            while(p<n){ if(clean[p]=='(') depth++; else if(clean[p]==')'){ depth--; if(depth==0){ p++; break; } } p++; }
+            int q=p; while(q<n && (clean[q]==' '||clean[q]=='\t'||clean[q]=='\r'||clean[q]=='\n')) q++;
+            if(q<n && clean[q]=='{' && !MemberAccess(clean,q2)){
+              int d2=0; int r=q; int close=n-1;
+              while(r<n){ if(clean[r]=='{') d2++; else if(clean[r]=='}'){ d2--; if(d2==0){ close=r; break; } } r++; }
+              int steps=CountSteps(lines,LineOf(st,q),LineOf(st,close));
+              res.Add(new Row{File=path,Line=LineOf(st,q2),Function=name,Steps=steps});
+              q2=close+1; continue;
+            }
+            q2=p; continue;
+          } else { q2=j; continue; }
+        } else q2++;
+      }
+      return res;
+    }
+
+    public static List<Row> Analyze(string path,string src,Dictionary<string,string> defs,bool ignore){
+      string clean=Strip(src);
+      if(!ignore){ var d=new Dictionary<string,string>(defs); clean=Preprocess(clean,d); }
+      return Scan(path,clean);
+    }
+    public static List<Sw> CollectSwitches(string src){
+      string clean=Strip(src); char[] b=clean.ToCharArray(); int n=b.Length;
+      var map=new Dictionary<string,Sw>(); int ls=0; int lineno=0;
+      while(ls<=n){ lineno++; int le=ls; while(le<n && b[le]!='\n') le++;
+        int rest; int kind=ParseDirective(b,ls,le,out rest);
+        if(kind==1||kind==2){ string nm=FirstIdent(b,rest,le); if(nm!=null) AddSw(map,nm,lineno); }
+        else if(kind==3||kind==4){ int p=rest; while(p<le){ if(IdStart(b[p])){ int s2=p; while(p<le && IdChar(b[p])) p++; string nm=new string(b,s2,p-s2); if(nm!="defined") AddSw(map,nm,lineno); } else p++; } }
+        if(le>=n) break; ls=le+1;
+      }
+      return new List<Sw>(map.Values);
+    }
+    static void AddSw(Dictionary<string,Sw> map,string name,int line){ Sw s; if(map.TryGetValue(name,out s)){ s.Count++; } else { map[name]=new Sw{Name=name,Count=1,Line=line}; } }
+  }
+}
+'@
+    try {
+        Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
+        $script:FiNativeType = [FuncInspectorNative.Engine]
+        return $true
+    }
+    catch { Write-Verbose "FiNative コンパイル失敗 (純PSにフォールバック): $_"; return $false }
+}
+
 function Open-FiLocation {
     <# ファイルの該当行を開く (VS Code 優先、無ければ OS 既定アプリ)。 #>
     param([string]$File, [int]$Line)
@@ -316,6 +519,10 @@ function Get-FiFileSwitches {
     param([string]$FilePath)
     $res = @{}
     try { $src = [System.IO.File]::ReadAllText($FilePath) } catch { return $res }
+    if (Initialize-FiNative) {
+        foreach ($s in $script:FiNativeType::CollectSwitches($src)) { $res[$s.Name] = @{ Count = $s.Count; Line = $s.Line } }
+        return $res
+    }
     $clean = Remove-FICommentsStrings $src
     $ln = 0
     foreach ($line in ($clean -split "`n")) {
@@ -429,7 +636,7 @@ function Get-FiScan {
                     $l2 = LineOf $close
                     $steps = CountSteps $l1 $l2
                     $results.Add([pscustomobject]@{ File = $FilePath; Line = (LineOf $i); Function = $name; Steps = $steps })
-                    $i = $qq + 1
+                    $i = $close + 1   # 本体は再走査しない
                     continue
                 }
                 $i = $p; continue
@@ -455,6 +662,12 @@ function Find-CFunctions {
     )
     try { $src = [System.IO.File]::ReadAllText($FilePath) }
     catch { Write-Warning "読み込み失敗: $FilePath"; return @() }
+
+    if (Initialize-FiNative) {
+        $nd = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        if ($Defines) { foreach ($k in $Defines.Keys) { $nd[[string]$k] = [string]$Defines[$k] } }
+        return $script:FiNativeType::Analyze($FilePath, $src, $nd, [bool]$IgnoreSwitches)
+    }
 
     $clean = Remove-FICommentsStrings $src
     if (-not $IgnoreSwitches) {

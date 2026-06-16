@@ -375,11 +375,16 @@ def _preceded_by_member_access(s, idx):
     return False
 
 
-def _build_line_starts(s):
+def _build_line_starts(s, lines=None):
+    # 各行の開始オフセット。行配列の長さから組み立てる方が
+    # 全文字を走査するより速い (反復回数が文字数→行数に減る)。
+    if lines is None:
+        lines = s.split('\n')
     starts = [0]
-    for i, ch in enumerate(s):
-        if ch == '\n':
-            starts.append(i + 1)
+    total = 0
+    for ln in lines:
+        total += len(ln) + 1
+        starts.append(total)
     return starts
 
 
@@ -405,8 +410,8 @@ def _count_steps(lines, l1, l2):
 def _scan(clean):
     """クリーン化済みテキストから (line, name, steps) を抽出。"""
     n = len(clean)
-    starts = _build_line_starts(clean)
     lines = clean.split('\n')
+    starts = _build_line_starts(clean, lines)
     results = []
     i = 0
     while i < n:
@@ -452,7 +457,8 @@ def _scan(clean):
                     l2 = _line_of(starts, close)
                     steps = _count_steps(lines, l1, l2)
                     results.append((_line_of(starts, i), name, steps))
-                    i = q + 1
+                    # 本体は再走査しない (C に入れ子関数は無い)。閉じ括弧の次へ。
+                    i = close + 1
                     continue
                 i = p
                 continue
