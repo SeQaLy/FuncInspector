@@ -444,6 +444,8 @@ static char  g_incdirs[64][1024];
 static int   g_incdir_count = 0;
 static char  g_inc_stack[64][2048];
 static int   g_inc_sp = 0;
+static char  **g_autodirs = NULL;   /* スキャン対象ツリーの自動検索パス */
+static int   g_autodir_count = 0, g_autodir_cap = 0;
 
 /* コメントのみ空白化 (文字列はそのまま残す。include ターゲット保持用) */
 static void strip_comments(char *buf, size_t n) {
@@ -486,8 +488,12 @@ static int resolve_include(const char *name, const char *base_dir, char *out, si
     char cand[4096];
     snprintf(cand, sizeof(cand), "%.2000s%c%.1024s", base_dir, PATH_SEP, name);
     if (file_exists(cand)) { snprintf(out, outsz, "%.2000s", cand); return 1; }
-    for (int i = 0; i < g_incdir_count; ++i) {
+    for (int i = 0; i < g_incdir_count; ++i) {   /* 明示 -I (優先) */
         snprintf(cand, sizeof(cand), "%.2000s%c%.1024s", g_incdirs[i], PATH_SEP, name);
+        if (file_exists(cand)) { snprintf(out, outsz, "%.2000s", cand); return 1; }
+    }
+    for (int i = 0; i < g_autodir_count; ++i) {  /* スキャン対象ツリーを自動検索 */
+        snprintf(cand, sizeof(cand), "%.2000s%c%.1024s", g_autodirs[i], PATH_SEP, name);
         if (file_exists(cand)) { snprintf(out, outsz, "%.2000s", cand); return 1; }
     }
     return 0;
@@ -921,6 +927,46 @@ static void walk(const char *path, void (*cb)(const char *, void *), void *ctx) 
     }
 }
 
+static void autodir_add(const char *d) {
+    for (int i = 0; i < g_autodir_count; ++i) if (strcmp(g_autodirs[i], d) == 0) return;
+    if (g_autodir_count == g_autodir_cap) {
+        g_autodir_cap = g_autodir_cap ? g_autodir_cap * 2 : 64;
+        g_autodirs = (char **)realloc(g_autodirs, g_autodir_cap * sizeof(char *));
+    }
+    g_autodirs[g_autodir_count++] = strdup(d);
+}
+
+/* スキャン対象ツリーのディレクトリを g_autodirs に集める (自動 include 検索用) */
+static void collect_dirs(const char *path) {
+    if (is_directory(path)) {
+        autodir_add(path);
+#ifdef _WIN32
+        char pattern[4096];
+        snprintf(pattern, sizeof(pattern), "%s%c*", path, PATH_SEP);
+        WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                char child[4096]; snprintf(child, sizeof(child), "%s%c%s", path, PATH_SEP, fd.cFileName);
+                collect_dirs(child);
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+#else
+        DIR *dd = opendir(path); if (!dd) return; struct dirent *e;
+        while ((e = readdir(dd)) != NULL) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            char child[4096]; snprintf(child, sizeof(child), "%s%c%s", path, PATH_SEP, e->d_name);
+            if (is_directory(child)) collect_dirs(child);
+        }
+        closedir(dd);
+#endif
+    } else {
+        char base[2048]; dirname_of(path, base, sizeof(base)); autodir_add(base);
+    }
+}
+
 static void cb_count(const char *path, void *ctx) { (void)path; (*(long *)ctx)++; }
 static void cb_analyze(const char *path, void *ctx) { (void)ctx; progress_tick(path); analyze_file(path); }
 static void cb_switches(const char *path, void *ctx) { progress_tick(path); list_switches_file(path, (SwSet *)ctx); }
@@ -967,7 +1013,8 @@ static void usage(const char *prog) {
         "  --ignore-switches   条件コンパイルを無視して全コードを対象\n"
         "  --external-switches ソース内 #define/#undef を無視 (スイッチは -D 選択のみ)\n"
         "  --resolve-includes  [重い] プロジェクト include (\"...\") をたどってマクロを解決\n"
-        "  -I DIR              include 検索パス (--resolve-includes 用)\n"
+        "                      (対象ツリーは自動検索するので通常 -I は不要)\n"
+        "  -I DIR              include 検索パスの上書き/追加 (優先。ツリー外ヘッダ等に)\n"
         "  --ext .c,.h         対象拡張子 (既定 .c,.h)\n"
         "  --no-header         先頭のヘッダ行を付けない (既定は付ける)\n"
         "  --out FILE          出力先 (既定 標準出力)\n"
@@ -1012,6 +1059,9 @@ int main(int argc, char **argv) {
     /* 進捗表示用に対象ファイル総数を先に数える */
     g_file_total = 0; g_file_idx = 0;
     for (int i = 0; i < npaths; ++i) walk(paths[i], cb_count, &g_file_total);
+
+    /* resolve モード: スキャン対象ツリーを自動 include 検索パスにする (-I は優先) */
+    if (g_resolve) for (int i = 0; i < npaths; ++i) collect_dirs(paths[i]);
 
     if (g_list_switches) {
         SwSet sw; sw_init(&sw);

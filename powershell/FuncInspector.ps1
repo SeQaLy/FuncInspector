@@ -28,6 +28,8 @@
 .PARAMETER Undef          OFF にするスイッチ (-U)。複数可。
 .PARAMETER IgnoreSwitches 条件コンパイルを無視して全コードを対象にする。
 .PARAMETER ExternalSwitches ソース内の #define/#undef を無視し、スイッチは -D 選択のみで決める。
+.PARAMETER ResolveIncludes  [重い] プロジェクト include("...")をたどって別ファイルの #define を反映。対象ツリーは自動検索。
+.PARAMETER IncludeDirs      -I 検索パスの上書き/追加 (任意・優先)。既定で対象ツリーを自動検索するため通常は不要。
 
 .EXAMPLE
     .\FuncInspector.ps1 -Path .\src

@@ -2,7 +2,7 @@
 
 `python tests/run_tests.py` で再実行できます。各テストは **期待値(アンカー)** と **3実装の相互一致** の両方を検証します。
 
-- 実行日時: 2026-06-17 02:03:42
+- 実行日時: 2026-06-17 08:20:55
 - 検証した実装: Python, C, PowerShell
 - C: gcc でビルドして検証
 - PowerShell: `pwsh.EXE` で検証
@@ -30,6 +30,8 @@
 | `ext-2` | --external-switches -D TOOL_TEST=2: t2 が出る (==1 は出ない) | PASS | PASS | PASS | ✅ |
 | `inc-light` | 軽量(include解決なし): inccfg.h を読まないので TOOL_TEST 未定義 → inc_always のみ | PASS | PASS | PASS | ✅ |
 | `inc-resolve` | --resolve-includes: inccfg.h の TOOL_TEST=1 を反映 → inc_t1, inc_always | PASS | PASS | PASS | ✅ |
+| `inc-auto-light` | 軽量(ディレクトリ走査): サブフォルダ cfg2.h を読まない → base2 のみ | PASS | PASS | PASS | ✅ |
+| `inc-auto` | 自動include検出: -I 無しでサブフォルダ deep/cfg2.h を解決 (FEATURE2=1 → feat2) | PASS | PASS | PASS | ✅ |
 | `edge-known` | 既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し | PASS | PASS | PASS | ✅ |
 
 ## テストデータと結果の詳細
@@ -190,6 +192,23 @@
 - 期待: 2件 → inc_t1(steps=1), inc_always(steps=1)
 - 非検出を期待: inc_t2
 - 実際の検出: L8 inc_t1 (steps=1); L13 inc_always (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### inc-auto-light — incproj
+
+- 説明: 軽量(ディレクトリ走査): サブフォルダ cfg2.h を読まない → base2 のみ
+- モード: 関数抽出  オプション: (なし)
+- 期待: 1件 → base2(steps=1)
+- 非検出を期待: feat2
+- 実際の検出: L8 base2 (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### inc-auto — incproj
+
+- 説明: 自動include検出: -I 無しでサブフォルダ deep/cfg2.h を解決 (FEATURE2=1 → feat2)
+- モード: 関数抽出  オプション: (なし)
+- 期待: 2件 → feat2(steps=1), base2(steps=1)
+- 実際の検出: L5 feat2 (steps=1); L8 base2 (steps=1)
 - 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
 
 ### edge-known — edge.c

@@ -45,11 +45,20 @@ switch,occurrences,state,filepath,line
 |---|---|---|
 | 想定ユーザー | 「とにかく関数の一覧が欲しい」 | 「どのスイッチでどの関数が有効かを正確に追いたい」 |
 | `#include "..."` | **たどらない**(各ファイル単体で解析) | **たどる**(プロジェクト include を解決し別ファイルの `#define` も反映) |
-| 速度 | 速い | ヘッダ処理ぶん遅い (`-I` とファイル相対で `"..."` のみ解決。`<...>` は追わない) |
+| 速度 | 速い | ヘッダ処理ぶん遅い (`"..."` のみ。`<...>` システムヘッダは追わない) |
 | 例 | `config.h` の `TOOL_TEST 1` は見えない | `config.h` を読んで `#if TOOL_TEST==1` を正しく判定 |
 
 スイッチ追跡モードは cpp 準拠（ソース内＋ヘッダの `#define` を順に反映、`-D`/`-U` は優先）。
-`-I DIR` で include 検索パスを追加できます（`"..."` はまずインクルード元ディレクトリ、次に `-I` 群）。
+**スキャン対象ツリーは自動で検索パスに含めるので、通常は `-I` 不要**です
+（`config.h` がプロジェクト内のどこにあっても見つかります）。
+
+**`-I` は上書き/追加用（任意・優先）**: ツリーの外にあるヘッダを足したい時や、
+解決先を明示したい時だけ指定します。解決順は ① インクルード元ファイルと同じフォルダ →
+② `-I` で指定したフォルダ → ③ スキャン対象ツリー（自動）。GUI では「include解決(重い)」
+チェック＋「-I(任意)」欄（空でOK）です。
+
+> 補足: プロジェクト内に**同名ヘッダが複数**ある場合だけ、自動検索ではどれが選ばれるか
+> 不定になり得ます。その時は `-I` で優先フォルダを指定して確定させてください。
 
 ## 特徴
 
@@ -117,7 +126,7 @@ python python/func_inspector.py --gui
 ```
 
 オプション: `--out/-o 出力先` `--ext 拡張子` `--no-header` `--gui`
-`--list-switches` `-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `--resolve-includes` `-I DIR`
+`--list-switches` `-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `--resolve-includes` `-I DIR(任意)`
 
 ## 2. PowerShell 版 (`powershell/FuncInspector.ps1`)
 
@@ -140,7 +149,7 @@ GUI は Windows Forms を使用します (Windows 環境)。
 ```
 
 オプション: `-Out` `-Extensions` `-NoHeader` `-Gui` `-ListSwitches`
-`-D/-Define NAME[,NAME=VAL]` `-U/-Undef NAME` `-IgnoreSwitches` `-ExternalSwitches` `-ResolveIncludes` `-I/-IncludeDirs DIR`
+`-D/-Define NAME[,NAME=VAL]` `-U/-Undef NAME` `-IgnoreSwitches` `-ExternalSwitches` `-ResolveIncludes` `-I/-IncludeDirs DIR(任意)`
 
 実行ポリシーで止まる場合:
 `powershell -ExecutionPolicy Bypass -File .\powershell\FuncInspector.ps1 -Gui`
@@ -191,7 +200,7 @@ cl  /O2 c/func_inspector.c                          # MSVC (Windows)
 ```
 
 オプション: `--out 出力先` `--ext 拡張子` `--no-header` `--list-switches`
-`-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `--resolve-includes` `-I DIR` `-h/--help`
+`-D NAME[=VAL]` `-U NAME` `--ignore-switches` `--external-switches` `--resolve-includes` `-I DIR(任意)` `-h/--help`
 
 ## 検出ロジック
 

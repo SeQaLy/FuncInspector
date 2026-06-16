@@ -737,15 +737,37 @@ def analyze_file(path, defines=None, pinned=None, external=False, resolve=False,
     return [(path, line, name, steps) for (line, name, steps) in rows]
 
 
+def _auto_include_dirs(paths):
+    """スキャン対象ツリー内の全ディレクトリを include 検索パスとして集める
+    (resolve モードで -I 不要にするための自動検出)。"""
+    dirs = []
+    seen = set()
+    for p in paths:
+        if os.path.isdir(p):
+            for root, _d, _f in os.walk(p):
+                ap = os.path.abspath(root)
+                if ap not in seen:
+                    seen.add(ap); dirs.append(ap)
+        elif os.path.isfile(p):
+            ap = os.path.abspath(os.path.dirname(p))
+            if ap not in seen:
+                seen.add(ap); dirs.append(ap)
+    return dirs
+
+
 def analyze_paths(paths, exts, defines=None, pinned=None, external=False,
                   resolve=False, inc_dirs=None, progress=None):
     files = gather_files(paths, exts)
+    search_dirs = inc_dirs
+    if resolve:
+        # 明示 -I を優先し、その後にスキャン対象ツリーを自動追加
+        search_dirs = list(inc_dirs or []) + _auto_include_dirs(paths)
     total = len(files)
     rows = []
     for idx, fp in enumerate(files, 1):
         if progress:
             progress(idx, total, fp)
-        rows.extend(analyze_file(fp, defines, pinned, external, resolve, inc_dirs))
+        rows.extend(analyze_file(fp, defines, pinned, external, resolve, search_dirs))
     return rows
 
 
@@ -1109,9 +1131,11 @@ def main(argv=None):
     parser.add_argument("--resolve-includes", action="store_true",
                         help="[スイッチ追跡モード/重い] プロジェクト include (\"...\") を"
                              "たどってマクロを解決してから関数を判定する (別ファイルの"
-                             " #define を反映)。<...> システムヘッダは追わない")
+                             " #define を反映)。スキャン対象ツリーは自動検索するので通常"
+                             " -I は不要。<...> システムヘッダは追わない")
     parser.add_argument("-I", dest="incdir", action="append", metavar="DIR",
-                        help="include 検索パス (--resolve-includes 用。複数指定可)")
+                        help="include 検索パスの上書き/追加 (優先)。既定で対象ツリーは"
+                             "自動検索するため、ツリー外のヘッダを足す時などに使う。複数可")
     args = parser.parse_args(argv)
 
     if args.gui or not args.paths:

@@ -624,6 +624,24 @@ function Remove-FICommentsOnly([string]$Src) {
     }
     return $sb.ToString()
 }
+function Get-FiAutoIncludeDirs([string[]]$Paths) {
+    # スキャン対象ツリーの全ディレクトリを自動 include 検索パスにする (-I 不要化)
+    $dirs = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($p in ($Paths | Where-Object { $_ })) {
+        try {
+            if ([IO.Directory]::Exists($p)) {
+                $all = @($p) + @([IO.Directory]::GetDirectories($p, '*', [IO.SearchOption]::AllDirectories))
+                foreach ($d in $all) { $ap = [IO.Path]::GetFullPath($d); if (-not $seen.ContainsKey($ap)) { $seen[$ap] = $true; $dirs.Add($ap) } }
+            }
+            elseif ([IO.File]::Exists($p)) {
+                $ap = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($p)); if (-not $seen.ContainsKey($ap)) { $seen[$ap] = $true; $dirs.Add($ap) }
+            }
+        }
+        catch {}
+    }
+    return $dirs.ToArray()
+}
 function Resolve-FiInclude([string]$Name, [string]$BaseDir, [string[]]$IncludeDirs) {
     try { $cand = [IO.Path]::Combine($BaseDir, $Name); if ([IO.File]::Exists($cand)) { return [IO.Path]::GetFullPath($cand) } } catch {}
     foreach ($d in ($IncludeDirs | Where-Object { $_ })) { try { $cand = [IO.Path]::Combine($d, $Name); if ([IO.File]::Exists($cand)) { return [IO.Path]::GetFullPath($cand) } } catch {} }
@@ -969,12 +987,15 @@ function Show-FuncInspectorGui {
     $cbResolve = New-Object System.Windows.Forms.CheckBox
     $cbResolve.Text = 'include解決(重い)'; $cbResolve.Location = '440,46'; $cbResolve.AutoSize = $true
     $form.Controls.Add($cbResolve)
+    $tip = New-Object System.Windows.Forms.ToolTip
+    $tip.SetToolTip($cbResolve, '別ファイルの #define まで解決 (対象ツリーは自動検索, -I は通常不要)')
     $lblInc = New-Object System.Windows.Forms.Label
-    $lblInc.Text = '-I:'; $lblInc.Location = '565,48'; $lblInc.AutoSize = $true
+    $lblInc.Text = '-I(任意):'; $lblInc.Location = '565,48'; $lblInc.AutoSize = $true
     $form.Controls.Add($lblInc)
     $tbInc = New-Object System.Windows.Forms.TextBox
-    $tbInc.Location = '590,45'; $tbInc.Size = '300,22'; $tbInc.Anchor = 'Top,Left,Right'
+    $tbInc.Location = '620,45'; $tbInc.Size = '270,22'; $tbInc.Anchor = 'Top,Left,Right'
     $form.Controls.Add($tbInc)
+    $tip.SetToolTip($tbInc, '上書き/追加の検索パス (; か , 区切り)。既定で対象ツリーを自動検索するため通常は空でOK')
 
     # --- スイッチ ペイン (左) ---
     $lblSw = New-Object System.Windows.Forms.Label
@@ -1079,9 +1100,11 @@ function Show-FuncInspectorGui {
             $rows = New-Object System.Collections.Generic.List[object]
             $i = 0
             $pinned = [string[]]$defines.Keys
+            $searchdirs = $incdirs
+            if ($resolve) { $searchdirs = @($incdirs) + (Get-FiAutoIncludeDirs @($pathArg)) }
             foreach ($f in $files) {
                 $i++; $sync.Progress = $i; $sync.Current = $f
-                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore -External:$external -Resolve:$resolve -IncludeDirs $incdirs)) { $rows.Add($r) }
+                foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore -External:$external -Resolve:$resolve -IncludeDirs $searchdirs)) { $rows.Add($r) }
             }
             $sync.Result = $rows
         } catch { $sync.Error = $_.Exception.Message }
@@ -1311,11 +1334,14 @@ function Invoke-FuncInspector {
     # 関数抽出モード
     $rows = New-Object System.Collections.Generic.List[object]
     $files = Get-FITargetFiles -Paths $Path -Exts $Extensions
+    # resolve モード: 明示 -I (優先) + スキャン対象ツリーの自動検索
+    $resolveDirs = $IncludeDirs
+    if ($ResolveIncludes) { $resolveDirs = @($IncludeDirs) + (Get-FiAutoIncludeDirs $Path) }
     $total = $files.Count; $i = 0
     foreach ($f in $files) {
         $i++
         Write-Progress -Activity 'FuncInspector' -Status ("解析 {0}/{1} {2}" -f $i, $total, $f) -PercentComplete ($(if ($total) { $i * 100 / $total } else { 100 }))
-        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned.ToArray() -IgnoreSwitches:$IgnoreSwitches -External:$ExternalSwitches -Resolve:$ResolveIncludes -IncludeDirs $IncludeDirs)) { $rows.Add($r) }
+        foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned.ToArray() -IgnoreSwitches:$IgnoreSwitches -External:$ExternalSwitches -Resolve:$ResolveIncludes -IncludeDirs $resolveDirs)) { $rows.Add($r) }
     }
     Write-Progress -Activity 'FuncInspector' -Completed
     if ($AsObject) { return $rows }

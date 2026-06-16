@@ -112,6 +112,14 @@ TESTS = [
          desc="--resolve-includes: inccfg.h の TOOL_TEST=1 を反映 → inc_t1, inc_always",
          expect={"count": 2, "funcs": {"inc_t1": 1, "inc_always": 1}, "absent": ["inc_t2"]}),
 
+    dict(id="inc-auto-light", file="incproj", mode="scan", defines=[], ignore=False,
+         desc="軽量(ディレクトリ走査): サブフォルダ cfg2.h を読まない → base2 のみ",
+         expect={"count": 1, "funcs": {"base2": 1}, "absent": ["feat2"]}),
+
+    dict(id="inc-auto", file="incproj", mode="scan", defines=[], ignore=False, resolve=True,
+         desc="自動include検出: -I 無しでサブフォルダ deep/cfg2.h を解決 (FEATURE2=1 → feat2)",
+         expect={"count": 2, "funcs": {"feat2": 1, "base2": 1}, "absent": []}),
+
     dict(id="edge-known", file="edge.c", mode="scan", defines=[], ignore=False,
          desc="既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し",
          expect={"count": 1, "funcs": {"DEFINE_HANDLER": 1},
