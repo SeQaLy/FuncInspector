@@ -1047,8 +1047,11 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($swlv)
 
     $btnDetect = New-Object System.Windows.Forms.Button
-    $btnDetect.Text = 'スイッチ検出'; $btnDetect.Location = '10,535'; $btnDetect.Size = '300,26'; $btnDetect.Anchor = 'Bottom,Left'
+    $btnDetect.Text = 'スイッチ検出'; $btnDetect.Location = '10,535'; $btnDetect.Size = '230,26'; $btnDetect.Anchor = 'Bottom,Left'
     $form.Controls.Add($btnDetect)
+    $btnHelp = New-Object System.Windows.Forms.Button
+    $btnHelp.Text = '説明'; $btnHelp.Location = '246,535'; $btnHelp.Size = '64,26'; $btnHelp.Anchor = 'Bottom,Left'
+    $form.Controls.Add($btnHelp)
 
     # --- 関数 ペイン (右) ---
     $lblFn = New-Object System.Windows.Forms.Label
@@ -1268,6 +1271,82 @@ function Show-FuncInspectorGui {
                 [System.IO.File]::WriteAllText($dlg.FileName, $sb.ToString(), [System.Text.Encoding]::UTF8)
                 $status.Text = ("保存しました: {0}" -f $dlg.FileName)
             }
+        })
+
+    $script:FiHelpText = @'
+FuncInspector の使い方 — 「何をすると何が検出対象になるか」
+
+■ 基本
+  関数定義 ( ... ) { ... } の関数名を抽出します。
+  プロトタイプ宣言・関数呼び出し・コメント/文字列内は対象外。
+  WINAMS などのマクロが関数名の前に付いていても対応します。
+
+■ 画面
+  左 = スイッチ表 / 右 = 検出された関数一覧。
+  上の「フォルダ...」「ファイル...」で対象を指定 →「スキャン」。
+  「スイッチ検出」で左の表にスイッチと値候補が出ます。
+
+■ スイッチ表（左）の使い方
+  ・ON   … そのスイッチを「定義された」状態にする。
+  ・値   … プルダウンで値を選ぶ（例 TOOL_TEST = 1 / 2）。
+           候補が1つだけ（#ifdef など）はグレー＝値選択は不要。
+  ・初出 … セルをダブルクリックでソースの該当箇所を開く。
+  ・絞り込み … スイッチ名で表示を絞る（ON/値の選択は保持）。
+
+■ 検出対象の決まり方（重要）
+  (1) 何も選択しない【既定＝選択スイッチのみ有効】
+      → #if 条件を評価。未選択のスイッチは OFF（未定義）。
+      → #ifdef や #if X==1 の中の関数は出ない。
+        #else 側・無条件の関数だけが出る。
+      → ソース内の #define は無視（選択がすべて）。
+
+  (2) スイッチを ON にして値を選ぶ
+      → そのスイッチが定義され、対応する #if 枝の関数が出る。
+        例: TOOL_TEST=1 → #if TOOL_TEST==1 の関数。
+
+  (3)「全コード有効(スイッチ無視)」にチェック
+      → #if を一切評価せず、すべての枝の関数を出す。
+        排他の枝（#if と #else）も両方出るので最大集合。
+        実際には同時にコンパイルされない関数も含む＝多めに出る。
+
+  (4)「include解決(重い)」にチェック
+      → #include "..." をたどり、別ファイル(config.h 等)の
+        #define を反映する＝実ビルドに近い判定。
+        対象フォルダは自動検索。-I 欄は通常不要（上書き/追加用）。
+
+■ 「関数数が違う」のはなぜ？
+  ・全コード有効   … すべての枝（多い／上限）
+  ・何も選択しない … スイッチ全OFFのときに有効な枝だけ（少ない）
+  ・ON選択/include解決 … その構成で実際に有効な関数（実ビルド寄り）
+
+■ 関数一覧（右）
+  ・絞り込み … 関数名で絞る。
+  ・行をダブルクリックでソースの該当行を開く。
+  ・「CSV 保存」で filepath,line,funcname,steps を保存。
+
+■ ステップ数
+  関数本体の実行行数（空行・コメント・波括弧だけの行は除く）。
+'@
+    $btnHelp.Add_Click({
+            $hf = New-Object System.Windows.Forms.Form
+            $hf.Text = 'FuncInspector の説明'
+            $hf.Size = New-Object System.Drawing.Size(660, 600)
+            $hf.StartPosition = 'CenterParent'
+            $hf.MinimizeBox = $false; $hf.MaximizeBox = $true
+            $tbh = New-Object System.Windows.Forms.TextBox
+            $tbh.Multiline = $true; $tbh.ReadOnly = $true; $tbh.ScrollBars = 'Vertical'
+            $tbh.WordWrap = $true; $tbh.Dock = 'Fill'
+            $tbh.BackColor = [System.Drawing.Color]::White
+            try { $tbh.Font = New-Object System.Drawing.Font('Yu Gothic UI', 10) } catch {}
+            $tbh.Text = ($script:FiHelpText -replace "`r?`n", "`r`n")
+            $tbh.Select(0, 0)
+            $hf.Controls.Add($tbh)
+            $btnClose = New-Object System.Windows.Forms.Button
+            $btnClose.Text = '閉じる'; $btnClose.Dock = 'Bottom'; $btnClose.Height = 30
+            $btnClose.Add_Click({ $hf.Close() })
+            $hf.Controls.Add($btnClose)
+            [void]$hf.ShowDialog($form)
+            $hf.Dispose()
         })
 
     $form.Add_FormClosed({ if ($script:FiTimer) { $script:FiTimer.Stop() } })
