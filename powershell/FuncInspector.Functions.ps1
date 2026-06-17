@@ -161,11 +161,11 @@ function Initialize-FiNative {
     $script:FiNativeTried = $true
     # 名前空間にバージョンを付与: C# のシグネチャを変えたら必ず番号を上げること。
     # こうすると、同一プロセスに残った旧版の型と衝突せず、更新後の型を必ずコンパイルできる。
-    try { $script:FiNativeType = [FuncInspectorNativeV6.Engine]; return $true } catch {}
+    try { $script:FiNativeType = [FuncInspectorNativeV7.Engine]; return $true } catch {}
     $code = @'
 using System;
 using System.Collections.Generic;
-namespace FuncInspectorNativeV6 {
+namespace FuncInspectorNativeV7 {
   public class Row { public string File; public int Line; public string Function; public int Steps; }
   public class Sw  { public string Name; public int Count; public int Line; public List<string> Vals = new List<string>(); }
   public static class Engine {
@@ -378,6 +378,22 @@ namespace FuncInspectorNativeV6 {
       }
       return o.ToString();
     }
+    // コメント除去済みソースのキャッシュ (プロセス内で永続=GUIの再スキャンを高速化)。
+    // path + 更新時刻 + サイズ で検証。ファイルが変わったら自動で再読込。
+    class Src { public long Mtime; public long Size; public string Text; }
+    static readonly Dictionary<string,Src> _srcCache = new Dictionary<string,Src>();
+    static readonly object _cacheLock = new object();
+    static string ReadStripped(string path){
+      try{
+        var fi = new System.IO.FileInfo(path);
+        long mt = fi.LastWriteTimeUtc.Ticks; long sz = fi.Length;
+        lock(_cacheLock){ Src s; if(_srcCache.TryGetValue(path, out s) && s.Mtime==mt && s.Size==sz) return s.Text; }
+        string stripped = StripComments(System.IO.File.ReadAllText(path));
+        lock(_cacheLock){ _srcCache[path] = new Src{ Mtime=mt, Size=sz, Text=stripped }; }
+        return stripped;
+      } catch { return null; }
+    }
+    public static void ClearCache(){ lock(_cacheLock){ _srcCache.Clear(); } }
     static string ResolveInclude(string name, string baseDir, string[] incDirs){
       try{ string cand=System.IO.Path.Combine(baseDir,name); if(System.IO.File.Exists(cand)) return System.IO.Path.GetFullPath(cand); }catch{}
       if(incDirs!=null) foreach(var dd in incDirs){ try{ string cand=System.IO.Path.Combine(dd,name); if(System.IO.File.Exists(cand)) return System.IO.Path.GetFullPath(cand); }catch{} }
@@ -412,8 +428,8 @@ namespace FuncInspectorNativeV6 {
           if(inc!=null){ blank=true;
             string hp=ResolveInclude(inc,baseDir,incDirs);
             if(hp!=null && !seen.Contains(hp)){
-              string hsrc=null; try{ hsrc=System.IO.File.ReadAllText(hp); }catch{}
-              if(hsrc!=null){ char[] hb=StripComments(hsrc).ToCharArray(); seen.Add(hp);
+              string hc=ReadStripped(hp);
+              if(hc!=null){ char[] hb=hc.ToCharArray(); seen.Add(hp);
                 PpProcess(hb, d, pinned, System.IO.Path.GetDirectoryName(hp), false, depth+1, incDirs, seen); seen.Remove(hp); }
             }
           } else { if(!emit) blank=true; }
@@ -423,8 +439,8 @@ namespace FuncInspectorNativeV6 {
       }
     }
     public static List<Row> AnalyzeResolve(string path, Dictionary<string,string> defs, HashSet<string> pinned, string[] incDirs){
-      string src; try{ src=System.IO.File.ReadAllText(path); }catch{ return new List<Row>(); }
-      char[] b = StripComments(src).ToCharArray();
+      string cc = ReadStripped(path); if(cc==null) return new List<Row>();
+      char[] b = cc.ToCharArray();
       var d = new Dictionary<string,string>(defs);
       string baseDir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path));
       var seen = new HashSet<string>(); seen.Add(System.IO.Path.GetFullPath(path));
@@ -437,7 +453,7 @@ namespace FuncInspectorNativeV6 {
 '@
     try {
         Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-        $script:FiNativeType = [FuncInspectorNativeV6.Engine]
+        $script:FiNativeType = [FuncInspectorNativeV7.Engine]
         return $true
     }
     catch { Write-Verbose "FiNative コンパイル失敗 (純PSにフォールバック): $_"; return $false }
