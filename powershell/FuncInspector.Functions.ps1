@@ -1140,6 +1140,19 @@ function Show-FuncInspectorGui {
                 }
             }
         })
+    # 行ホバーで到達条件を「全文・複数行」ツールチップ表示 (深いネストでもはみ出さない)
+    $swlv.ShowCellToolTips = $true
+    $swlv.Add_CellToolTipTextNeeded({
+            param($eSender, $e)
+            if ($e.RowIndex -lt 0) { return }
+            $tag = $swlv.Rows[$e.RowIndex].Tag
+            if (-not $tag) { return }
+            if (-not $tag.Reach) {
+                $cond = Get-FiReachCondition $tag.File ([int]$tag.Line)
+                $tag | Add-Member -NotePropertyName Reach -NotePropertyValue $cond -Force
+            }
+            $e.ToolTipText = ("この関数群が出る条件:`r`n  " + ($tag.Reach -replace ' かつ ', "`r`n  かつ "))
+        })
     # チェック/コンボの編集を即確定
     $swlv.Add_CurrentCellDirtyStateChanged({ if ($swlv.IsCurrentCellDirty) { $swlv.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit) } })
     $form.Controls.Add($swlv)
@@ -1174,11 +1187,14 @@ function Show-FuncInspectorGui {
         })
     $form.Controls.Add($lv)
 
-    $pb = New-Object System.Windows.Forms.ProgressBar
-    $pb.Location = '322,540'; $pb.Size = '330,18'; $pb.Anchor = 'Bottom,Left'; $pb.Minimum = 0; $pb.Maximum = 1
+    $pb = New-Object System.Windows.Forms.ProgressBar      # ファイル進捗 (N/総数)
+    $pb.Location = '322,536'; $pb.Size = '330,14'; $pb.Anchor = 'Bottom,Left'; $pb.Minimum = 0; $pb.Maximum = 1
     $form.Controls.Add($pb)
+    $pb2 = New-Object System.Windows.Forms.ProgressBar     # 解析中アクティビティ (マーキー)
+    $pb2.Location = '322,552'; $pb2.Size = '330,10'; $pb2.Anchor = 'Bottom,Left'; $pb2.Style = 'Continuous'; $pb2.MarqueeAnimationSpeed = 30
+    $form.Controls.Add($pb2)
     $status = New-Object System.Windows.Forms.Label
-    $status.Location = '322,565'; $status.Size = '470,20'; $status.Text = '準備完了'; $status.Anchor = 'Bottom,Left'
+    $status.Location = '322,566'; $status.Size = '470,18'; $status.Text = '準備完了'; $status.Anchor = 'Bottom,Left'
     $form.Controls.Add($status)
 
     $btnScan = New-Object System.Windows.Forms.Button
@@ -1257,6 +1273,7 @@ function Show-FuncInspectorGui {
         $script:FiSync = [hashtable]::Synchronized(@{ Progress = 0; Total = 0; Current = ''; Done = $false; Result = $null; Error = $null; Mode = $mode })
         $btnScan.Enabled = $false; $btnDetect.Enabled = $false; $btnSave.Enabled = $false
         $pb.Value = 0; $status.Text = '開始...'
+        $pb2.Style = 'Marquee'   # 解析中アクティビティを表示 (固まっていない目印)
         $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState = 'STA'; $rs.ThreadOptions = 'ReuseThread'; $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
         if ($mode -eq 'switch') {
@@ -1409,6 +1426,7 @@ function Show-FuncInspectorGui {
                     Update-FnView   # 現在の絞り込みを反映して一覧表示
                 }
                 $pb.Value = 0
+                $pb2.Style = 'Continuous'; $pb2.Value = 0   # マーキー停止
                 $btnScan.Enabled = $true; $btnDetect.Enabled = $true; $btnSave.Enabled = $true
             }
         })
