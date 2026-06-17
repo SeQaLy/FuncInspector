@@ -120,6 +120,22 @@ TESTS = [
          desc="自動include検出: -I 無しでサブフォルダ deep/cfg2.h を解決 (FEATURE2=1 → feat2)",
          expect={"count": 2, "funcs": {"feat2": 1, "base2": 1}, "absent": []}),
 
+    dict(id="flag-resolve-none", file="flagsw.c", mode="scan", defines=[], ignore=False, resolve=True,
+         desc="resolve/未選択: フラグ(CFG_AAA,CFG_UFS_ENABLE)はOFF, CFG_NUM=10≠5 → always_fn のみ",
+         expect={"count": 1, "funcs": {"always_fn": 1}, "absent": ["aaa_fn", "ufs_fn", "num5_fn"]}),
+
+    dict(id="flag-resolve-aaa", file="flagsw.c", mode="scan", defines=["CFG_AAA"], ignore=False, resolve=True,
+         desc="resolve -D CFG_AAA: フラグを選択 → aaa_fn, always_fn",
+         expect={"count": 2, "funcs": {"aaa_fn": 1, "always_fn": 1}, "absent": ["ufs_fn", "num5_fn"]}),
+
+    dict(id="flag-resolve-ufs", file="flagsw.c", mode="scan", defines=["CFG_UFS_ENABLE"], ignore=False, resolve=True,
+         desc="resolve -D CFG_UFS_ENABLE: CFG_ENABLE=1 が連鎖 → ufs_fn, always_fn",
+         expect={"count": 2, "funcs": {"ufs_fn": 1, "always_fn": 1}, "absent": ["aaa_fn", "num5_fn"]}),
+
+    dict(id="flag-resolve-num5", file="flagsw.c", mode="scan", defines=["CFG_NUM=5"], ignore=False, resolve=True,
+         desc="resolve -D CFG_NUM=5: ピン留めで #define CFG_NUM 10 を上書き → num5_fn, always_fn",
+         expect={"count": 2, "funcs": {"num5_fn": 1, "always_fn": 1}, "absent": ["aaa_fn", "ufs_fn"]}),
+
     dict(id="edge-known", file="edge.c", mode="scan", defines=[], ignore=False,
          desc="既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し",
          expect={"count": 1, "funcs": {"DEFINE_HANDLER": 1},

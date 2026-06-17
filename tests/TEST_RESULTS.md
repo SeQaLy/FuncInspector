@@ -2,7 +2,7 @@
 
 `python tests/run_tests.py` で再実行できます。各テストは **期待値(アンカー)** と **3実装の相互一致** の両方を検証します。
 
-- 実行日時: 2026-06-17 16:19:41
+- 実行日時: 2026-06-17 20:14:26
 - 検証した実装: Python, C, PowerShell
 - C: gcc でビルドして検証
 - PowerShell: `pwsh.EXE` で検証
@@ -32,6 +32,10 @@
 | `inc-resolve` | --resolve-includes: inccfg.h の TOOL_TEST=1 を反映 → inc_t1, inc_always | PASS | PASS | PASS | ✅ |
 | `inc-auto-light` | 軽量(ディレクトリ走査): サブフォルダ cfg2.h を読まない → base2 のみ | PASS | PASS | PASS | ✅ |
 | `inc-auto` | 自動include検出: -I 無しでサブフォルダ deep/cfg2.h を解決 (FEATURE2=1 → feat2) | PASS | PASS | PASS | ✅ |
+| `flag-resolve-none` | resolve/未選択: フラグ(CFG_AAA,CFG_UFS_ENABLE)はOFF, CFG_NUM=10≠5 → always_fn のみ | PASS | PASS | PASS | ✅ |
+| `flag-resolve-aaa` | resolve -D CFG_AAA: フラグを選択 → aaa_fn, always_fn | PASS | PASS | PASS | ✅ |
+| `flag-resolve-ufs` | resolve -D CFG_UFS_ENABLE: CFG_ENABLE=1 が連鎖 → ufs_fn, always_fn | PASS | PASS | PASS | ✅ |
+| `flag-resolve-num5` | resolve -D CFG_NUM=5: ピン留めで #define CFG_NUM 10 を上書き → num5_fn, always_fn | PASS | PASS | PASS | ✅ |
 | `edge-known` | 既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し | PASS | PASS | PASS | ✅ |
 
 ## テストデータと結果の詳細
@@ -211,6 +215,42 @@
 - 実際の検出: L5 feat2 (steps=1); L8 base2 (steps=1)
 - 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
 
+### flag-resolve-none — flagsw.c
+
+- 説明: resolve/未選択: フラグ(CFG_AAA,CFG_UFS_ENABLE)はOFF, CFG_NUM=10≠5 → always_fn のみ
+- モード: 関数抽出  オプション: (なし)
+- 期待: 1件 → always_fn(steps=1)
+- 非検出を期待: aaa_fn, ufs_fn, num5_fn
+- 実際の検出: L29 always_fn (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### flag-resolve-aaa — flagsw.c
+
+- 説明: resolve -D CFG_AAA: フラグを選択 → aaa_fn, always_fn
+- モード: 関数抽出  オプション: -D CFG_AAA
+- 期待: 2件 → aaa_fn(steps=1), always_fn(steps=1)
+- 非検出を期待: ufs_fn, num5_fn
+- 実際の検出: L10 aaa_fn (steps=1); L29 always_fn (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### flag-resolve-ufs — flagsw.c
+
+- 説明: resolve -D CFG_UFS_ENABLE: CFG_ENABLE=1 が連鎖 → ufs_fn, always_fn
+- モード: 関数抽出  オプション: -D CFG_UFS_ENABLE
+- 期待: 2件 → ufs_fn(steps=1), always_fn(steps=1)
+- 非検出を期待: aaa_fn, num5_fn
+- 実際の検出: L21 ufs_fn (steps=1); L29 always_fn (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
+### flag-resolve-num5 — flagsw.c
+
+- 説明: resolve -D CFG_NUM=5: ピン留めで #define CFG_NUM 10 を上書き → num5_fn, always_fn
+- モード: 関数抽出  オプション: -D CFG_NUM=5
+- 期待: 2件 → num5_fn(steps=1), always_fn(steps=1)
+- 非検出を期待: aaa_fn, ufs_fn
+- 実際の検出: L26 num5_fn (steps=1); L29 always_fn (steps=1)
+- 判定: Python=PASS, C=PASS, PowerShell=PASS / 3実装一致
+
 ### edge-known — edge.c
 
 - 説明: 既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し
@@ -313,6 +353,40 @@ int t2(void) { return 2; }
 #endif
 
 void always(void) { go(); }
+```
+
+### tests/cases/flagsw.c
+
+```c
+/* flagsw.c - include解決モードのルール検証
+ * フラグ(値なし #define)=選択駆動 / 値あり #define=反映。
+ *   resolve 未選択      : always_fn のみ (CFG_AAA/CFG_UFS_ENABLE はフラグ→OFF, CFG_NUM=10≠5)
+ *   resolve -D CFG_AAA  : aaa_fn, always_fn
+ *   resolve -D CFG_UFS_ENABLE : ufs_fn, always_fn (CFG_ENABLE=1 が連鎖)
+ *   resolve -D CFG_NUM=5: num5_fn, always_fn (ピン留めで 10 を上書き)
+ */
+#define CFG_AAA
+#ifdef CFG_AAA
+int aaa_fn(void) { return 0; }
+#endif
+
+#define CFG_UFS_ENABLE
+#ifdef CFG_UFS_ENABLE
+#define CFG_ENABLE 1
+#else
+#define CFG_ENABLE 0
+#endif
+
+#if CFG_ENABLE == 1
+int ufs_fn(void) { return 0; }
+#endif
+
+#define CFG_NUM 10
+#if CFG_NUM == 5
+int num5_fn(void) { return 0; }
+#endif
+
+void always_fn(void) { go(); }
 ```
 
 ### tests/cases/incmain.c

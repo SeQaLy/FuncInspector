@@ -537,7 +537,9 @@ def _pp_run(clean, defines, pinned, base_dir, inc_dirs, collect, depth, seen):
                     mm = _IDENT.search(rest)
                     if mm and mm.group(0) not in pinned:
                         after = rest[mm.end():].strip()
-                        defines[mm.group(0)] = after if after else '1'
+                        # 値あり #define X 10 = 反映 / 値なし #define X (フラグ) = 無視(選択駆動)
+                        if after:
+                            defines[mm.group(0)] = after
             elif kind == 'undef':
                 if emitting():
                     mm = _IDENT.search(rest)
