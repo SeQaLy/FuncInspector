@@ -54,80 +54,101 @@ MAX_INCLUDE_DEPTH = 40
 # --------------------------------------------------------------------------
 # コメント / 文字列の除去
 # --------------------------------------------------------------------------
+_SPECIAL = re.compile(r"""[/"']""")
+
+
+def _blank(seg: str) -> str:
+    """seg を空白化 (改行はそのまま残す。文字数維持)。"""
+    if '\n' in seg:
+        return _NL_KEEP.sub(' ', seg)
+    return ' ' * len(seg)
+
+
+_NL_KEEP = re.compile(r'[^\n]')
+
+
 def strip_comments_strings(src: str) -> str:
-    """コメントと文字列/文字リテラルを空白に置換 (文字数・改行位置は維持)。"""
+    """コメントと文字列/文字リテラルを空白に置換 (文字数・改行位置は維持)。
+    通常文字の連なりはまとめてコピーし、特殊文字 (/ " ') だけを個別処理して高速化。
+    """
     out = []
+    append = out.append
     i, n = 0, len(src)
     while i < n:
-        c = src[i]
-        if c == '/' and i + 1 < n and src[i + 1] == '/':
-            while i < n and src[i] != '\n':
-                out.append(' ')
-                i += 1
-        elif c == '/' and i + 1 < n and src[i + 1] == '*':
-            out.append('  ')
-            i += 2
-            while i < n and not (src[i] == '*' and i + 1 < n and src[i + 1] == '/'):
-                out.append('\n' if src[i] == '\n' else ' ')
-                i += 1
-            if i < n:
-                out.append('  ')
-                i += 2
-        elif c == '"' or c == "'":
-            quote = c
-            out.append(' ')
-            i += 1
-            while i < n and src[i] != quote:
-                if src[i] == '\\' and i + 1 < n:
-                    out.append('  ')
-                    i += 2
+        m = _SPECIAL.search(src, i)
+        if m is None:
+            append(src[i:])
+            break
+        j = m.start()
+        if j > i:
+            append(src[i:j])          # 通常文字の連なりはそのままコピー
+        c = src[j]
+        nxt = src[j + 1] if j + 1 < n else ''
+        if c == '/' and nxt == '/':
+            k = src.find('\n', j)
+            if k == -1:
+                append(' ' * (n - j)); i = n
+            else:
+                append(' ' * (k - j)); i = k   # 改行は次の通常コピーで保持
+        elif c == '/' and nxt == '*':
+            end = src.find('*/', j + 2)
+            if end == -1:
+                append(_blank(src[j:n])); i = n
+            else:
+                append(_blank(src[j:end + 2])); i = end + 2
+        else:                          # 文字列 / 文字リテラル
+            k = j + 1
+            while k < n and src[k] != c:
+                if src[k] == '\\' and k + 1 < n:
+                    k += 2
                 else:
-                    out.append('\n' if src[i] == '\n' else ' ')
-                    i += 1
-            if i < n:
-                out.append(' ')
-                i += 1
-        else:
-            out.append(c)
-            i += 1
+                    k += 1
+            if k < n:
+                k += 1                 # 閉じクォートを含める
+            append(_blank(src[j:k])); i = k
     return ''.join(out)
 
 
 def strip_comments(src: str) -> str:
     """コメントだけを空白化し、文字列リテラルはそのまま残す。
     `#include "x.h"` のターゲットを保持するために使う (include 追従モード用)。
+    通常文字はまとめてコピーし、特殊文字 (/ " ') だけ個別処理。
     """
     out = []
+    append = out.append
     i, n = 0, len(src)
     while i < n:
-        c = src[i]
-        if c == '/' and i + 1 < n and src[i + 1] == '/':
-            while i < n and src[i] != '\n':
-                out.append(' ')
-                i += 1
-        elif c == '/' and i + 1 < n and src[i + 1] == '*':
-            out.append('  ')
-            i += 2
-            while i < n and not (src[i] == '*' and i + 1 < n and src[i + 1] == '/'):
-                out.append('\n' if src[i] == '\n' else ' ')
-                i += 1
-            if i < n:
-                out.append('  ')
-                i += 2
-        elif c == '"' or c == "'":
-            quote = c
-            out.append(c)
-            i += 1
-            while i < n and src[i] != quote:
-                if src[i] == '\\' and i + 1 < n:
-                    out.append(src[i]); out.append(src[i + 1]); i += 2
+        m = _SPECIAL.search(src, i)
+        if m is None:
+            append(src[i:])
+            break
+        j = m.start()
+        if j > i:
+            append(src[i:j])
+        c = src[j]
+        nxt = src[j + 1] if j + 1 < n else ''
+        if c == '/' and nxt == '/':
+            k = src.find('\n', j)
+            if k == -1:
+                append(' ' * (n - j)); i = n
+            else:
+                append(' ' * (k - j)); i = k
+        elif c == '/' and nxt == '*':
+            end = src.find('*/', j + 2)
+            if end == -1:
+                append(_blank(src[j:n])); i = n
+            else:
+                append(_blank(src[j:end + 2])); i = end + 2
+        else:                          # 文字列/文字リテラルはそのまま残す
+            k = j + 1
+            while k < n and src[k] != c:
+                if src[k] == '\\' and k + 1 < n:
+                    k += 2
                 else:
-                    out.append(src[i]); i += 1
-            if i < n:
-                out.append(src[i]); i += 1
-        else:
-            out.append(c)
-            i += 1
+                    k += 1
+            if k < n:
+                k += 1
+            append(src[j:k]); i = k
     return ''.join(out)
 
 
@@ -604,78 +625,89 @@ def _line_of(starts, idx):
 def _count_steps(lines, l1, l2):
     """[l1..l2] 行のうち、空行・コメント行・波括弧のみの行を除いた行数。"""
     cnt = 0
+    nlines = len(lines)
     for k in range(l1, l2 + 1):
-        if k - 1 < 0 or k - 1 >= len(lines):
+        if k - 1 < 0 or k - 1 >= nlines:
             continue
-        stripped = ''.join(ch for ch in lines[k - 1] if not ch.isspace())
-        if not stripped:
-            continue
-        if all(ch in '{}' for ch in stripped):
-            continue
+        t = lines[k - 1].strip()
+        if not t:
+            continue                       # 空行・空白のみ
+        if not t.replace('{', '').replace('}', '').strip():
+            continue                       # 波括弧のみ
         cnt += 1
     return cnt
 
 
+_WS = ' \t\r\n'
+
+
 def _scan(clean):
-    """クリーン化済みテキストから (line, name, steps) を抽出。"""
+    """クリーン化済みテキストから (line, name, steps) を抽出。
+    識別子候補は正規表現 (C 実装) で列挙し、各候補だけを検査する。
+    関数本体内の候補は skip_to で読み飛ばす (C に入れ子関数は無い)。
+    """
     n = len(clean)
     lines = clean.split('\n')
     starts = _build_line_starts(clean, lines)
     results = []
-    i = 0
-    while i < n:
-        c = clean[i]
-        if _is_ident_start(c):
-            j = i
-            while j < n and _is_ident_char(clean[j]):
-                j += 1
-            name = clean[i:j]
-            k = j
-            while k < n and clean[k] in ' \t\r\n':
-                k += 1
-            if k < n and clean[k] == '(' and name not in KEYWORDS:
-                depth = 0
-                p = k
-                while p < n:
-                    if clean[p] == '(':
-                        depth += 1
-                    elif clean[p] == ')':
-                        depth -= 1
-                        if depth == 0:
-                            p += 1
-                            break
-                    p += 1
-                q = p
-                while q < n and clean[q] in ' \t\r\n':
-                    q += 1
-                if q < n and clean[q] == '{' and not _preceded_by_member_access(clean, i):
-                    # 本体の対応する } を探す
-                    d2 = 0
-                    r = q
-                    close = n - 1
-                    while r < n:
-                        if clean[r] == '{':
-                            d2 += 1
-                        elif clean[r] == '}':
-                            d2 -= 1
-                            if d2 == 0:
-                                close = r
-                                break
-                        r += 1
-                    l1 = _line_of(starts, q)
-                    l2 = _line_of(starts, close)
-                    steps = _count_steps(lines, l1, l2)
-                    results.append((_line_of(starts, i), name, steps))
-                    # 本体は再走査しない (C に入れ子関数は無い)。閉じ括弧の次へ。
-                    i = close + 1
-                    continue
-                i = p
-                continue
+    skip_to = 0
+    for m in _IDENT.finditer(clean):
+        i = m.start()
+        if i < skip_to:
+            continue
+        name = m.group()
+        if name in KEYWORDS:
+            continue
+        k = m.end()
+        while k < n and clean[k] in _WS:
+            k += 1
+        if k >= n or clean[k] != '(':
+            continue
+        # 対応する ) を探す (括弧へ find でジャンプ)
+        depth = 0
+        p = k
+        while p < n:
+            o = clean.find('(', p)
+            c2 = clean.find(')', p)
+            if c2 == -1:
+                p = n
+                break
+            if o != -1 and o < c2:
+                depth += 1
+                p = o + 1
             else:
-                i = j
-                continue
-        else:
-            i += 1
+                depth -= 1
+                p = c2 + 1
+                if depth == 0:
+                    break
+        q = p
+        while q < n and clean[q] in _WS:
+            q += 1
+        if q >= n or clean[q] != '{' or _preceded_by_member_access(clean, i):
+            continue
+        # 本体の対応する } を探す (波括弧へ find でジャンプ)
+        d2 = 0
+        r = q
+        close = n - 1
+        while r < n:
+            o = clean.find('{', r)
+            c2 = clean.find('}', r)
+            if c2 == -1:
+                break
+            if o != -1 and o < c2:
+                d2 += 1
+                r = o + 1
+            else:
+                d2 -= 1
+                r = c2 + 1
+                if d2 == 0:
+                    close = c2
+                    break
+        l1 = _line_of(starts, q)
+        l2 = _line_of(starts, close)
+        steps = _count_steps(lines, l1, l2)
+        results.append((_line_of(starts, i), name, steps))
+        skip_to = close + 1   # 本体内の候補は飛ばす
     return results
 
 
