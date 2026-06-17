@@ -674,11 +674,14 @@ function Get-FiReachCondition([string]$File, [int]$Line) {
     return (($stack | ForEach-Object { $_.Cur }) -join ' && ')
 }
 
-function Get-FiResolvedDefines([string]$FilePath, [string[]]$IncludeDirs) {
-    # include 解決後に「定義されている」マクロ表(name->value)を返す。GUIの有効スイッチ自動チェック用。
+function Get-FiResolvedDefines([string]$FilePath, [hashtable]$Defines, [string[]]$Pinned, [string[]]$IncludeDirs) {
+    # include 解決後に「定義されている」マクロ表(name->value)を返す。
+    # Defines/Pinned を上書き(優先)として渡せる (ベースライン差分の固定を反映するため)。
     if (Initialize-FiNative) {
         $nd = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        if ($Defines) { foreach ($k in $Defines.Keys) { $nd[[string]$k] = [string]$Defines[$k] } }
         $np = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($p in ($Pinned | Where-Object { $_ })) { [void]$np.Add([string]$p) }
         $h = @{}
         try {
             $r = $script:FiNativeType::ResolveDefines($FilePath, $nd, $np, [string[]]$IncludeDirs)
@@ -689,10 +692,11 @@ function Get-FiResolvedDefines([string]$FilePath, [string[]]$IncludeDirs) {
     }
     # 純PSフォールバック
     try { $cc = Remove-FICommentsOnly ([IO.File]::ReadAllText($FilePath)) } catch { return @{} }
-    $d = @{}
+    $d = if ($Defines) { $Defines.Clone() } else { @{} }
+    $pin = @{}; foreach ($p in ($Pinned | Where-Object { $_ })) { $pin[[string]$p] = $true }
     $base = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($FilePath))
     $seen = @{}; $seen[[IO.Path]::GetFullPath($FilePath)] = $true
-    Invoke-FiPpProcess $cc $d @{} $base $false 0 $IncludeDirs $seen $null
+    Invoke-FiPpProcess $cc $d $pin $base $false 0 $IncludeDirs $seen $null
     return $d
 }
 
@@ -1057,7 +1061,7 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($cbIgnore)
     # include 解決 (スイッチ追跡/重い)。別ファイルの #define まで反映。
     $cbResolve = New-Object System.Windows.Forms.CheckBox
-    $cbResolve.Text = '実設定で解決 (別ファイルの #define も反映・重い)'; $cbResolve.Location = '440,46'; $cbResolve.AutoSize = $true
+    $cbResolve.Text = '実設定抽出(コンパイルスイッチ抽出)'; $cbResolve.Location = '440,46'; $cbResolve.AutoSize = $true
     $form.Controls.Add($cbResolve)
     $tip = New-Object System.Windows.Forms.ToolTip
     $tip.SetToolTip($cbResolve, '別ファイル(config.h 等)の #define まで解決して実ビルド準拠で判定 (対象ツリーは自動検索)')
@@ -1169,25 +1173,32 @@ function Show-FuncInspectorGui {
     $form.Controls.Add($btnSave)
 
     $script:FIguiRows = @()
+    $script:FiResolvedBaseline = @{}   # 実設定で解決時のベースライン (差分固定の基準)
     $script:FiSync = $null; $script:FiPS = $null; $script:FiRS = $null; $script:FiHandle = $null
 
     # バックグラウンド実行用スクリプト
     $sbScan = {
-        param($sync, $corePath, $pathArg, $exts, $defines, $ignore, $external, $resolve, $incdirs)
+        param($sync, $corePath, $pathArg, $exts, $defines, $ignore, $external, $resolve, $incdirs, $pinnedArg)
         try {
             . $corePath
             $files = Get-FITargetFiles -Paths @($pathArg) -Exts $exts
             $sync.Total = $files.Count
             $rows = New-Object System.Collections.Generic.List[object]
             $i = 0
-            $pinned = [string[]]$defines.Keys
+            $pinned = if ($pinnedArg) { [string[]]$pinnedArg } else { [string[]]$defines.Keys }
             $searchdirs = $incdirs
             if ($resolve) { $searchdirs = @($incdirs) + (Get-FiAutoIncludeDirs @($pathArg)) }
+            $resolved = @{}
             foreach ($f in $files) {
                 $i++; $sync.Progress = $i; $sync.Current = $f
                 foreach ($r in (Find-CFunctions -FilePath $f -Defines $defines -Pinned $pinned -IgnoreSwitches:$ignore -External:$external -Resolve:$resolve -IncludeDirs $searchdirs)) { $rows.Add($r) }
+                if ($resolve) {
+                    $rd = Get-FiResolvedDefines -FilePath $f -Defines $defines -Pinned $pinned -IncludeDirs $searchdirs
+                    foreach ($k in $rd.Keys) { $resolved[$k] = $rd[$k] }
+                }
             }
             $sync.Result = $rows
+            if ($resolve) { $sync.Resolved = $resolved }
         } catch { $sync.Error = $_.Exception.Message }
         finally { $sync.Done = $true }
     }
@@ -1212,7 +1223,7 @@ function Show-FuncInspectorGui {
                     foreach ($v in $fs[$name].Values) { if (-not $agg[$name].Values.Contains([string]$v)) { $agg[$name].Values.Add([string]$v) } }
                 }
                 if ($resolve) {
-                    $rd = Get-FiResolvedDefines -FilePath $f -IncludeDirs $searchdirs
+                    $rd = Get-FiResolvedDefines -FilePath $f -Defines @{} -Pinned @() -IncludeDirs $searchdirs
                     foreach ($k in $rd.Keys) { $resolved[$k] = $rd[$k] }
                 }
             }
@@ -1237,21 +1248,38 @@ function Show-FuncInspectorGui {
             [void]$ps.AddScript($sbSwitch.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument([bool]$cbResolve.Checked).AddArgument(@())
         }
         else {
+            $resolve = [bool]$cbResolve.Checked
             $defines = @{}
-            # DataGridView の ON 行: 値コンボの選択値で定義 (空なら 1)
-            foreach ($row in $swlv.Rows) {
-                if ($row.Cells['On'].Value -eq $true) {
-                    $nm = [string]$row.Cells['Sw'].Value
-                    if (-not $nm) { continue }
+            $pinnedList = New-Object System.Collections.Generic.List[string]
+            if ($resolve) {
+                # 実設定で解決: ベースライン(自動チェック状態)から「変えた分だけ」固定
+                $baseline = $script:FiResolvedBaseline; if ($null -eq $baseline) { $baseline = @{} }
+                foreach ($row in $swlv.Rows) {
+                    $nm = [string]$row.Cells['Sw'].Value; if (-not $nm) { continue }
+                    $on = ($row.Cells['On'].Value -eq $true)
                     $val = [string]$row.Cells['Val'].Value
-                    if (-not $val) { $val = '1' }
-                    $defines[$nm] = $val
+                    $inBase = $baseline.ContainsKey($nm)
+                    if ($on) {
+                        $baseVal = if ($inBase) { [string]$baseline[$nm] } else { '' }
+                        if ((-not $inBase) -or ($val -ne '' -and $val -ne $baseVal)) {
+                            $defines[$nm] = if ($val) { $val } else { '1' }; $pinnedList.Add($nm)   # -D 上書き
+                        }
+                    }
+                    elseif ($inBase) { $pinnedList.Add($nm) }   # ソースが定義→未チェックに変更 = -U 固定OFF
                 }
             }
-            $resolve = [bool]$cbResolve.Checked
+            else {
+                # 選択スイッチのみ有効: チェック行だけ定義 (未チェックはソース無視で OFF)
+                foreach ($row in $swlv.Rows) {
+                    if ($row.Cells['On'].Value -eq $true) {
+                        $nm = [string]$row.Cells['Sw'].Value; if (-not $nm) { continue }
+                        $val = [string]$row.Cells['Val'].Value; if (-not $val) { $val = '1' }
+                        $defines[$nm] = $val; $pinnedList.Add($nm)
+                    }
+                }
+            }
             $incdirs = @()   # GUI は対象ツリーを自動検索 (-I 指定欄は廃止)
-            # include 解決時は cpp 準拠 (external は使わない)。非解決時は選択スイッチのみ有効。
-            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument(-not $resolve).AddArgument($resolve).AddArgument($incdirs)
+            [void]$ps.AddScript($sbScan.ToString()).AddArgument($script:FiSync).AddArgument($script:FiScriptPath).AddArgument($tb.Text.Trim()).AddArgument($exts).AddArgument($defines).AddArgument([bool]$cbIgnore.Checked).AddArgument(-not $resolve).AddArgument($resolve).AddArgument($incdirs).AddArgument($pinnedList.ToArray())
         }
         $script:FiPS = $ps; $script:FiRS = $rs; $script:FiHandle = $ps.BeginInvoke()
         $timer.Start()
@@ -1291,6 +1319,22 @@ function Show-FuncInspectorGui {
             if ($q -and $nm.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { $vis = $false }
             if ($row.Visible -ne $vis) { $row.Visible = $vis }
         }
+    }
+    # 解決後マクロ表($resolved)にグリッドを同期: 定義されている行をON+値、その他はOFF。
+    # 併せてベースライン(次回の差分基準)を更新する。
+    function Set-FiGridResolved($resolved) {
+        if ($null -eq $resolved) { return }
+        foreach ($row in $swlv.Rows) {
+            $nm = [string]$row.Cells['Sw'].Value
+            if ($resolved.ContainsKey($nm)) {
+                $row.Cells['On'].Value = $true
+                $rv = [string]$resolved[$nm]
+                if ($rv) { $vc = $row.Cells['Val']; if (-not $vc.Items.Contains($rv)) { [void]$vc.Items.Add($rv) }; $vc.Value = $rv }
+            }
+            else { $row.Cells['On'].Value = $false }
+        }
+        $script:FiResolvedBaseline = @{}
+        foreach ($k in $resolved.Keys) { $script:FiResolvedBaseline[$k] = [string]$resolved[$k] }
     }
     $tbFnFilter.Add_TextChanged({ if ($script:FIguiRows) { Update-FnView } })
     $tbSwFilter.Add_TextChanged({ Update-SwView })
@@ -1332,30 +1376,20 @@ function Show-FuncInspectorGui {
                         }
                         $swlv.Rows[$idx].Tag = $info
                     }
-                    # include解決時: 実際に有効だったスイッチを ON にし、値も反映
+                    # include解決時: 実際に有効なスイッチを ON+値 に同期しベースライン更新
                     $resolved = $s.Resolved
-                    if ($resolved -and $resolved.Count) {
-                        foreach ($row in $swlv.Rows) {
-                            $nm = [string]$row.Cells['Sw'].Value
-                            if ($resolved.ContainsKey($nm)) {
-                                $row.Cells['On'].Value = $true
-                                $rv = [string]$resolved[$nm]
-                                if ($rv) {
-                                    $vc = $row.Cells['Val']
-                                    if (-not $vc.Items.Contains($rv)) { [void]$vc.Items.Add($rv) }
-                                    $vc.Value = $rv
-                                }
-                            }
-                        }
-                    }
+                    if ($resolved -and $resolved.Count) { Set-FiGridResolved $resolved }
+                    else { $script:FiResolvedBaseline = @{} }
                     # Switch 列を内容に合わせて自動フィット (以降も列境界ドラッグで変更可)
                     try { $swlv.AutoResizeColumn(1); if ($swlv.Columns[1].Width -gt 260) { $swlv.Columns[1].Width = 260 } } catch {}
                     Update-SwView   # 現在の絞り込みを反映
-                    $msg = if ($resolved -and $resolved.Count) { "完了: {0} 個 (include解決: 有効スイッチを自動チェック)" } else { "完了: {0} 個のスイッチ (行クリックで到達条件を表示)" }
+                    $msg = if ($resolved -and $resolved.Count) { "完了: {0} 個 (実設定で解決: 有効スイッチを自動チェック)" } else { "完了: {0} 個のスイッチ (行クリックで到達条件を表示)" }
                     $status.Text = ($msg -f $agg.Count)
                 }
                 else {
                     $script:FIguiRows = $s.Result
+                    # 実設定で解決のスキャン後: グリッドを再解決後の状態へ同期 (件数とカスケードを反映)
+                    if ($s.Resolved) { Set-FiGridResolved $s.Resolved; Update-SwView }
                     Update-FnView   # 現在の絞り込みを反映して一覧表示
                 }
                 $pb.Value = 0
