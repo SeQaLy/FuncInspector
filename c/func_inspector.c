@@ -554,8 +554,8 @@ static void pp_process(char *buf, size_t n, Defs *d, const char *base_dir, int c
                     size_t ve = le; while (ve > vs && (buf[ve-1]==' '||buf[ve-1]=='\t'||buf[ve-1]=='\r')) ve--;
                     char val[256]; size_t vlen = ve - vs; if (vlen >= sizeof(val)) vlen = sizeof(val)-1;
                     memcpy(val, buf + vs, vlen); val[vlen] = '\0';
-                    /* 値あり=反映 / 値なし(フラグ)=無視(選択駆動) */
-                    if (vlen) defs_set(d, nm, val); } break; }
+                    /* 完全 cpp 準拠: 値あり=その値 / 値なし(フラグ)=定義(1) */
+                    defs_set(d, nm, vlen ? val : "1"); } break; }
                 case D_UNDEF: { if (emit && first_ident(buf, rest, le, nm, sizeof(nm), &after) && !defs_has(&g_pinned, nm)) defs_remove(d, nm); break; }
             }
         } else {

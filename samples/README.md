@@ -31,25 +31,31 @@ python python/func_inspector.py samples --resolve-includes
 
 ## 期待される検出結果（モード別）
 
-| モード / 選択 | 検出される関数 |
+include解決は **完全 cpp 準拠**：ソースの `#define`（フラグ含む）をたどって反映します。
+このサンプルは `config.h`/`platform.h` でフラグ（`USE_FEATURE_X`,`PLATFORM_ARM`）を
+`#define` しているので、**include解決では既定で ON**。外したい時は `-U` で上書きします。
+
+| モード / 上書き | 検出される関数 |
 |---|---|
 | **軽量(既定/include解決なし)** | `main`, `startup`, `units_other` |
-| **include解決 / 未選択** | `main`, `startup`, `debug_dump`, `generic_multi`, `units4_setup` |
-| **include解決 / `-D USE_FEATURE_X`** | 上記 ＋ `feature_x_init`, `fx_advanced` |
-| **include解決 / `-D PLATFORM_ARM`** | `main`, `startup`, `debug_dump`, `units4_setup`, **`arm32_handler`**（`generic_multi` の代わり） |
-| **include解決 / `-D MAX_UNITS=2`** | `main`, `startup`, `debug_dump`, **`generic_single`**, **`units2_setup`** |
+| **include解決 / 上書きなし** | `main`, `startup`, `debug_dump`, `arm32_handler`, `units4_setup`, `feature_x_init`, `fx_advanced`（7個）|
+| **include解決 / `-U USE_FEATURE_X`** | 上記から `feature_x_init`, `fx_advanced` が消える |
+| **include解決 / `-U PLATFORM_ARM`** | `arm32_handler` → **`generic_multi`** に変わる |
+| **include解決 / `-D MAX_UNITS=2`** | `units4_setup` → **`units2_setup`** に変わる |
 | **全コード有効(スイッチ無視)** | すべての枝（13個。排他の枝も両方）|
 
 ### 読み解きの要点
 
-- **軽量**は各ファイル単体なので `config.h` を読まない → `BUILD_LEVEL` 等は未定義。
-  `MAX_UNITS` も未定義なので `module.c` は `#else` の `units_other` になる。
-- **include解決/未選択**:
-  - `BUILD_LEVEL=2`,`MAX_UNITS=4`（値マクロ）は反映 → `debug_dump`,`units4_setup`,`generic_multi`。
-  - `USE_FEATURE_X`,`PLATFORM_ARM`（フラグ）は**選択していないので OFF** → `feature_x_init`/`arm*` は出ない。
-- **`-D USE_FEATURE_X`**: フラグON → `FEATURE_X_LEVEL=3` が**派生(カスケード)** → `fx_advanced` まで出る。
-- **`-D PLATFORM_ARM`**: フラグON → `WORD_SIZE=32` が派生 → `arm32_handler`。
-- **`-D MAX_UNITS=2`**: ピン留めで `config.h` の `4` を上書き → `units2_setup`＋`generic_single`。
+- **軽量**は各ファイル単体なので `config.h` を読まない → `BUILD_LEVEL`/`MAX_UNITS` 等は未定義。
+  `module.c` は `#else` の `units_other` になる（`feature_x_init`/`arm*` も出ない）。
+- **include解決/上書きなし**:
+  - 値マクロ `BUILD_LEVEL=2`,`MAX_UNITS=4` を反映 → `debug_dump`,`units4_setup`。
+  - フラグ `USE_FEATURE_X`,`PLATFORM_ARM` も**ソースが定義しているので ON** →
+    `FEATURE_X_LEVEL=3`/`WORD_SIZE=32` が**派生(カスケード)** → `feature_x_init`,`fx_advanced`,`arm32_handler`。
+- **`-U USE_FEATURE_X`**: フラグを上書きOFF → `feature_x_init`,`fx_advanced` が消える。
+- **`-U PLATFORM_ARM`**: フラグを上書きOFF → `WORD_SIZE=16` → `arm32_handler` が `generic_multi` に。
+- **`-D MAX_UNITS=2`**: 値を上書き → `units2_setup`。
+- 「全部OFFから選択で足す」探索がしたい場合は、**通常（軽量）モード**＝選択スイッチのみ有効を使う。
 
 ## スイッチ一覧（`--list-switches`）の見え方
 

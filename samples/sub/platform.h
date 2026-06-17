@@ -1,7 +1,7 @@
 #ifndef PLATFORM_H
 #define PLATFORM_H
 
-/* フラグ: 既定OFF。-D PLATFORM_ARM で有効 */
+/* フラグ(値なし): include解決では「反映」され ON。-U PLATFORM_ARM で外せる */
 #define PLATFORM_ARM
 
 #ifdef PLATFORM_ARM

@@ -120,21 +120,17 @@ TESTS = [
          desc="自動include検出: -I 無しでサブフォルダ deep/cfg2.h を解決 (FEATURE2=1 → feat2)",
          expect={"count": 2, "funcs": {"feat2": 1, "base2": 1}, "absent": []}),
 
-    dict(id="flag-resolve-none", file="flagsw.c", mode="scan", defines=[], ignore=False, resolve=True,
-         desc="resolve/未選択: フラグ(CFG_AAA,CFG_UFS_ENABLE)はOFF, CFG_NUM=10≠5 → always_fn のみ",
+    dict(id="fc-default", file="flagsw.c", mode="scan", defines=[], ignore=False, resolve=True,
+         desc="完全cpp準拠: ソースの #define CFG_AAA/CFG_UFS_ENABLE を反映(フラグもON) → aaa_fn, ufs_fn(連鎖), always_fn。CFG_NUM=10≠5",
+         expect={"count": 3, "funcs": {"aaa_fn": 1, "ufs_fn": 1, "always_fn": 1}, "absent": ["num5_fn"]}),
+
+    dict(id="fc-undef", file="flagsw.c", mode="scan", defines=[], undef=["CFG_AAA", "CFG_UFS_ENABLE"], ignore=False, resolve=True,
+         desc="-U でフラグを上書きOFF: aaa_fn 消滅、CFG_ENABLE=0 連鎖で ufs_fn も消滅 → always_fn のみ",
          expect={"count": 1, "funcs": {"always_fn": 1}, "absent": ["aaa_fn", "ufs_fn", "num5_fn"]}),
 
-    dict(id="flag-resolve-aaa", file="flagsw.c", mode="scan", defines=["CFG_AAA"], ignore=False, resolve=True,
-         desc="resolve -D CFG_AAA: フラグを選択 → aaa_fn, always_fn",
-         expect={"count": 2, "funcs": {"aaa_fn": 1, "always_fn": 1}, "absent": ["ufs_fn", "num5_fn"]}),
-
-    dict(id="flag-resolve-ufs", file="flagsw.c", mode="scan", defines=["CFG_UFS_ENABLE"], ignore=False, resolve=True,
-         desc="resolve -D CFG_UFS_ENABLE: CFG_ENABLE=1 が連鎖 → ufs_fn, always_fn",
-         expect={"count": 2, "funcs": {"ufs_fn": 1, "always_fn": 1}, "absent": ["aaa_fn", "num5_fn"]}),
-
-    dict(id="flag-resolve-num5", file="flagsw.c", mode="scan", defines=["CFG_NUM=5"], ignore=False, resolve=True,
-         desc="resolve -D CFG_NUM=5: ピン留めで #define CFG_NUM 10 を上書き → num5_fn, always_fn",
-         expect={"count": 2, "funcs": {"num5_fn": 1, "always_fn": 1}, "absent": ["aaa_fn", "ufs_fn"]}),
+    dict(id="fc-num5", file="flagsw.c", mode="scan", defines=["CFG_NUM=5"], ignore=False, resolve=True,
+         desc="-D CFG_NUM=5 で 10 を上書き → num5_fn 追加(フラグは反映で aaa_fn, ufs_fn も)",
+         expect={"count": 4, "funcs": {"aaa_fn": 1, "ufs_fn": 1, "num5_fn": 1, "always_fn": 1}, "absent": []}),
 
     dict(id="edge-known", file="edge.c", mode="scan", defines=[], ignore=False,
          desc="既知の限界(現挙動を固定): DEFINE_HANDLER誤検出、trail/getfp/knr見逃し",
@@ -178,19 +174,24 @@ def run_c(exe, t):
 
 
 def run_ps(ps, t):
-    a = [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PSWRAP,
-         "-Path", os.path.join(CASES, t["file"])]
+    # -File はカンマ配列を分割しないため -Command で呼ぶ (対話実行と同じ解釈)
+    def q(s):
+        return "'" + str(s).replace("'", "''") + "'"
+    parts = ["&", q(PSWRAP), "-Path", q(os.path.join(CASES, t["file"]))]
     if t["mode"] == "switches":
-        a += ["-ListSwitches"]
+        parts.append("-ListSwitches")
     if t["defines"]:
-        a += ["-D", ",".join(t["defines"])]
+        parts += ["-D", ",".join(q(d) for d in t["defines"])]
+    if t.get("undef"):
+        parts += ["-U", ",".join(q(u) for u in t["undef"])]
     if t["ignore"]:
-        a += ["-IgnoreSwitches"]
+        parts.append("-IgnoreSwitches")
     if t.get("external"):
-        a += ["-ExternalSwitches"]
+        parts.append("-ExternalSwitches")
     if t.get("resolve"):
-        a += ["-ResolveIncludes"]
-    return _run(a)
+        parts.append("-ResolveIncludes")
+    cmd = " ".join(parts)
+    return _run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd])
 
 
 def _flags_common(t):
@@ -200,6 +201,8 @@ def _flags_common(t):
         a += ["--list-switches"]
     for d in t["defines"]:
         a += ["-D", d]
+    for u in t.get("undef", []):
+        a += ["-U", u]
     if t["ignore"]:
         a += ["--ignore-switches"]
     if t.get("external"):
