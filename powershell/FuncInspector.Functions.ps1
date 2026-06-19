@@ -1080,7 +1080,12 @@ function Show-FuncInspectorGui {
     $cbResolve.Text = '実設定抽出(コンパイルスイッチ抽出)'; $cbResolve.Location = '440,46'; $cbResolve.AutoSize = $true
     $form.Controls.Add($cbResolve)
     $tip = New-Object System.Windows.Forms.ToolTip
-    $tip.SetToolTip($cbResolve, '別ファイル(config.h 等)の #define まで解決して実ビルド準拠で判定 (対象ツリーは自動検索)')
+    $tip.SetToolTip($cbResolve, (@(
+                '別ファイル(config.h 等)の #define まで解決し、実ビルド準拠で判定 (対象ツリーは自動検索)。'
+                '・値あり #define X 10 → その値 / 値なしフラグ #define X → ON(定義) として反映。'
+                '・「スイッチ検出」で、有効なフラグ(値なし含む)も自動 ON になる。'
+                '・自動 ON されたフラグはチェックを外すと OFF(CUI の -U X 相当) にできる。'
+            ) -join "`r`n"))
 
     # --- スイッチ ペイン (左) ---
     $lblSw = New-Object System.Windows.Forms.Label
@@ -1354,8 +1359,11 @@ function Show-FuncInspectorGui {
         }
     }
     # 解決後マクロ表($resolved)にグリッドを同期: 定義されている行をON+値、その他はOFF。
-    # 併せてベースライン(次回の差分基準)を更新する。
-    function Set-FiGridResolved($resolved) {
+    # $AsBaseline=$true のときだけ差分基準(ベースライン)も更新する。
+    #   基準は「ソースの実設定」を表すべきもので、確定するのは『スイッチ検出』時のみ。
+    #   スキャン後の再同期(カスケード表示)で基準を動かすと、適用した上書きが基準に
+    #   吸収され、次回スキャンで差分ゼロ→ソース実設定へ逆戻りする(トグル化)。だから動かさない。
+    function Set-FiGridResolved($resolved, $AsBaseline = $true) {
         if ($null -eq $resolved) { return }
         foreach ($row in $swlv.Rows) {
             $nm = [string]$row.Cells['Sw'].Value
@@ -1366,8 +1374,10 @@ function Show-FuncInspectorGui {
             }
             else { $row.Cells['On'].Value = $false }
         }
-        $script:FiResolvedBaseline = @{}
-        foreach ($k in $resolved.Keys) { $script:FiResolvedBaseline[$k] = [string]$resolved[$k] }
+        if ($AsBaseline) {
+            $script:FiResolvedBaseline = @{}
+            foreach ($k in $resolved.Keys) { $script:FiResolvedBaseline[$k] = [string]$resolved[$k] }
+        }
     }
     $tbFnFilter.Add_TextChanged({ if ($script:FIguiRows) { Update-FnView } })
     $tbSwFilter.Add_TextChanged({ Update-SwView })
@@ -1421,8 +1431,10 @@ function Show-FuncInspectorGui {
                 }
                 else {
                     $script:FIguiRows = $s.Result
-                    # 実設定で解決のスキャン後: グリッドを再解決後の状態へ同期 (件数とカスケードを反映)
-                    if ($s.Resolved) { Set-FiGridResolved $s.Resolved; Update-SwView }
+                    # 実設定で解決のスキャン後: グリッドを再解決後の状態へ同期 (件数とカスケードを反映)。
+                    # ただし基準(ベースライン)は動かさない($AsBaseline=$false)。動かすと上書きが
+                    # 基準に吸収され、次回スキャンでソース実設定へ逆戻りする(1→2→1 のトグル)。
+                    if ($s.Resolved) { Set-FiGridResolved $s.Resolved $false; Update-SwView }
                     Update-FnView   # 現在の絞り込みを反映して一覧表示
                 }
                 $pb.Value = 0
@@ -1447,57 +1459,70 @@ function Show-FuncInspectorGui {
         })
 
     $script:FiHelpText = @'
-FuncInspector の使い方 — 「何をすると何が検出対象になるか」
+FuncInspector の使い方
 
-■ 基本
-  関数定義 ( ... ) { ... } の関数名を抽出します。
-  プロトタイプ宣言・関数呼び出し・コメント/文字列内は対象外。
-  WINAMS などのマクロが関数名の前に付いていても対応します。
+■ このツールは何をする？
+  C ソースから「関数定義」を抜き出して一覧にします（名前・場所・ステップ数）。
+  プロトタイプ宣言・関数呼び出し・コメント/文字列内は数えません。
+  WINAMS などのマクロが関数名の前に付いていても拾えます。
+  加えて #ifdef などのコンパイルスイッチを評価し、「その設定でコンパイルされる
+  関数だけ」に絞り込めます。
 
-■ 画面
-  左 = スイッチ表 / 右 = 検出された関数一覧。
-  上の「フォルダ...」「ファイル...」で対象を指定 →「スキャン」。
-  「スイッチ検出」で左の表にスイッチと値候補が出ます。
+■ 基本の流れ（4 ステップ）
+  1) 上の「フォルダ...」「ファイル...」で対象を選ぶ。
+  2)「スイッチ検出」… 左の表にスイッチ(#ifdef 等)と取り得る値が並ぶ。
+  3) 必要に応じてスイッチの ON / 値 を調整する。
+  4)「スキャン」… 右に「検出された関数一覧」が出る。
+  ※ 左 = スイッチ表 / 右 = 関数一覧。
 
-■ スイッチ表（左）の使い方
-  ・ON   … そのスイッチを「定義された」状態にする。
+■ スイッチ表（左）の見方
+  ・ON   … チェックを入れるとそのスイッチが「定義された」状態になる。
   ・値   … プルダウンで値を選ぶ（例 TOOL_TEST = 1 / 2）。
-           候補が1つだけ（#ifdef など）はグレー＝値選択は不要。
+           候補が1つだけ（#ifdef など）はグレー＝値の選択は不要。
   ・初出 … セルをダブルクリックでソースの該当箇所を開く。
-  ・行クリック … その関数群が出る条件(囲みの #if)を日本語でステータス表示
-      （例: 「BUILD_LEVEL が 1 以上 かつ PLATFORM_ARM を定義」）。
-  ・列幅 … Switch 列は内容に自動フィット。列境界のドラッグでも変更可。
-  ・絞り込み … スイッチ名で表示を絞る（ON/値の選択は保持）。
+  ・行クリック … その関数群が出る条件(囲みの #if)を日本語で下部に表示
+      （例:「BUILD_LEVEL が 1 以上 かつ PLATFORM_ARM を定義」）。
+  ・絞り込み … スイッチ名で表示を絞る（ON / 値の選択はそのまま保持）。
 
-■ 検出対象の決まり方（重要）
-  (1) 何も選択しない【既定＝選択スイッチのみ有効】
-      → #if 条件を評価。未選択のスイッチは OFF（未定義）。
-      → #ifdef や #if X==1 の中の関数は出ない。
-        #else 側・無条件の関数だけが出る。
-      → ソース内の #define は無視（選択がすべて）。
+■ どのモードで検出する？（重要）
+  上の 2 つのチェックボックスで「何を検出対象にするか」が決まります。
+  ※「枝」= #if と #else のような分岐のこと。
 
-  (2) スイッチを ON にして値を選ぶ
-      → そのスイッチが定義され、対応する #if 枝の関数が出る。
-        例: TOOL_TEST=1 → #if TOOL_TEST==1 の関数。
+  ◆ A. どちらもOFF（既定）＝「表で ON にしたスイッチだけ有効」
+       使う場面: 構成を手で組んで、その関数だけ見たい。
+       ・ON にしたスイッチだけ定義扱い。未チェックは OFF（未定義）。
+       ・ソース内の #define は見ない（あなたの選択がすべて）。
+       → 何も ON にしなければ #else 側・無条件の関数だけ。
+         例: TOOL_TEST を ON＝1 にすると #if TOOL_TEST==1 の関数も出る。
 
-  (3)「全コード有効(スイッチ無視)」にチェック
-      → #if を一切評価せず、すべての枝の関数を出す。
-        排他の枝（#if と #else）も両方出るので最大集合。
-        実際には同時にコンパイルされない関数も含む＝多めに出る。
+  ◆ B.「全コード有効(スイッチ無視)」
+       使う場面: とにかく全部の関数を漏れなく見たい。
+       ・#if を一切評価せず、すべての枝を出す（#if も #else も両方）。
+       → 最大集合。同時にはコンパイルされない関数も混ざる＝多め。
 
-  (4)「実設定で解決」にチェック ＝ 別ファイルの #define も反映(実ビルド準拠/重い)
-      → #include "..." をたどり config.h 等の #define を反映。対象フォルダは自動検索。
-        ・値あり #define X 10＝その値 / フラグ(値なし #define X)＝ON。連鎖も自動。
-        ・「スイッチ検出」すると、ソースで実際に有効なスイッチが自動でON＋値が入る。
-        ・そこからチェックを外す/値を変えると、その差分だけ反映して再判定
-          （外したスイッチに依存する関数は自動で消える＝カスケード）。
-        ・実値と違う枝（CFG_NUM=10 で #if CFG_NUM==5）は出ない。
-        ・全部OFFから選んで足したいときは通常(軽量)モードを使う。
+  ◆ C.「実設定抽出」＝ 実ビルドに最も近い（やや重い）
+       使う場面:「このプロジェクトを普通にビルドしたら何が入る？」を見たい。
+       ・#include "..." をたどり、config.h など別ファイルの #define まで反映。
+         対象フォルダは自動検索（-I 指定は不要）。
+       ・値マクロ #define X 10  → 値 10 として反映。
+       ・フラグ   #define X（値なし）→ ON(定義済み) として反映。
+         例: #define USE_FEATURE_X があれば、その配下の関数が出る。
+       ・別ファイル経由や連鎖する #define も自動でたどる。
+       ・「スイッチ検出」すると、ソースで実際に有効なスイッチ（フラグ含む）が
+         自動で ON＋値入りになる＝これが「実設定の基準」。
+       ・基準から変えた分だけ上書きして再判定できる:
+           - 値を変える      → その値でビルドした場合の結果。
+           - チェックを外す  → そのスイッチを未定義化（CUI の -U X 相当）。
+             例: USE_FEATURE_X を外す → feature_x_init などが消える。
+         親スイッチを外すと、依存する関数も自動で消える（＝カスケード）。
+       ・実値と違う枝は出ない（例: CFG_NUM=10 なら #if CFG_NUM==5 は対象外）。
+       ・基準を取り直したいときは、もう一度「スイッチ検出」を押す。
 
-■ 「関数数が違う」のはなぜ？
-  ・全コード有効   … すべての枝（多い／上限）
-  ・何も選択しない … スイッチ全OFFのときに有効な枝だけ（少ない）
-  ・ON選択/実設定で解決 … その構成で実際に有効な関数（実ビルド寄り）
+■ 「関数の数が違う」のはなぜ？
+  （多い順）全コード有効(B) ＞ 実設定抽出(C) ＞ 何も選ばない(A)
+  ・B 全コード有効 … すべての枝（最多・上限）
+  ・C 実設定抽出   … 実際にビルドされる関数（実ビルド寄り）
+  ・A 何も選ばない … スイッチ全OFFで残る枝だけ（最少）
 
 ■ 関数一覧（右）
   ・絞り込み … 関数名で絞る。
